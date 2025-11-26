@@ -14,11 +14,11 @@ export async function startServer() {
   const app = express();
   app.use(express.json());
 
-  app.get(`/${appConfig.BASE_PATH}/health`, (_req, res) => {
+  app.get(`${appConfig.BASE_PATH}/health`, (_req, res) => {
     res.json({ status: "OK" });
   });
 
-  app.use(`/${appConfig.BASE_PATH}/prescriptions`, prescriptionRoutes);
+  app.use(`${appConfig.BASE_PATH}/prescriptions`, prescriptionRoutes);
 
   app.use(errorHandler);
 
@@ -28,7 +28,7 @@ export async function startServer() {
     );
     console.log(`Environment: ${appConfig.NODE_ENV}`);
     console.log(
-      `Health check: http://localhost:${appConfig.PORT}/${BASE_PATH}/health`
+      `Health check: http://localhost:${appConfig.PORT}${BASE_PATH}/health`
     );
   });
 }
