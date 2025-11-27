@@ -1,6 +1,6 @@
 import { appConfig } from "../config/app.config";
 
-export const prescriptionParseWithGemini = async (text: string) => {
+export const prescriptionParseService = async (text: string) => {
   const prompt = `You are a medical prescription parser. Extract and structure the following information from the prescription text. Return ONLY a valid JSON object with exactly these fields:
 
 {

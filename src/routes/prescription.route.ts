@@ -1,14 +1,13 @@
 import { Router } from "express";
-import multer from "multer";
-import { prescriptionCreateController } from "../controllers/prescription.controller";
+import { prescriptionUploadController } from "../controllers/prescription.controller";
+import { upload } from "../middleware/upload.middleware";
 
 const router = Router();
-const upload = multer({ dest: "uploads/" });
 
 router.get("/", (_req, res) => {
   res.json({ message: "List of prescriptions" });
 });
 
-router.post("/", upload.single("image"), prescriptionCreateController);
+router.post("/upload", upload.single("image"), prescriptionUploadController);
 
 export default router;

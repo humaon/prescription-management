@@ -1,22 +1,20 @@
 import { Request, Response } from "express";
 import fs from "fs/promises";
-import Tesseract from "tesseract.js";
-import { createErrorResponse, createSuccessResponse } from "../lib/utils";
-import { prescriptionParseWithGemini } from "../services/prescription.service";
+import { extractText } from "../lib/ocr";
+import { createServiceError, createSuccessResponse } from "../lib/utils";
+import { prescriptionParseService } from "../services/prescription.service";
 
-export const prescriptionCreateController = async (
+export const prescriptionUploadController = async (
   req: Request,
   res: Response
 ) => {
   if (!req.file) {
-    return res.status(400).json(createErrorResponse("No image file uploaded"));
+    throw createServiceError("No image file uploaded", 400);
   }
 
   const imagePath = req.file.path;
-  const ocrResult = await Tesseract.recognize(imagePath, "eng");
-
-  const extractedText = ocrResult.data.text;
-  const parsedData = await prescriptionParseWithGemini(extractedText);
+  const extractedText = await extractText(imagePath);
+  const parsedData = await prescriptionParseService(extractedText);
 
   // Clean up uploaded file
   await fs.unlink(imagePath);
