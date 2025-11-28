@@ -1,12 +1,15 @@
 import app from "./app";
 import { runStartupTasks } from "./bootstrap/startup";
 import { appConfig } from "./config/app.config";
+import { connectDatabase } from "./config/db.config";
 
 const startServer = async () => {
   // Startup lifecycle
   await runStartupTasks();
 
-  // Server listen
+  // Database connection
+  await connectDatabase();
+
   app.listen(appConfig.PORT, () => {
     console.log(
       `Prescription management service is running on port ${appConfig.PORT}`
