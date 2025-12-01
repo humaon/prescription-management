@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  prescriptionDeleteByIdController,
   prescriptionGetAllController,
   prescriptionGetByIdController,
   prescriptionUploadController,
@@ -11,5 +12,6 @@ const router = Router();
 router.post("/", upload.single("image"), prescriptionUploadController);
 router.get("/", prescriptionGetAllController);
 router.get("/:id", prescriptionGetByIdController);
+router.delete("/:id", prescriptionDeleteByIdController);
 
 export default router;
