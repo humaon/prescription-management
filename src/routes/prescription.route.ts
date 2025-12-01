@@ -1,13 +1,13 @@
 import { Router } from "express";
-import { prescriptionUploadController } from "../controllers/prescription.controller";
+import {
+  prescriptionGetAllController,
+  prescriptionUploadController,
+} from "../controllers/prescription.controller";
 import { upload } from "../middleware/upload.middleware";
 
 const router = Router();
 
-router.get("/", (_req, res) => {
-  res.json({ message: "List of prescriptions" });
-});
-
-router.post("/upload", upload.single("image"), prescriptionUploadController);
+router.post("/", upload.single("image"), prescriptionUploadController);
+router.get("/", prescriptionGetAllController);
 
 export default router;

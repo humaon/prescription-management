@@ -1,47 +1,20 @@
 import { appConfig } from "../config/app.config";
+import { getPrompt } from "../lib/prompt";
+import {
+  IPrescriptionDocument,
+  PrescriptionModel,
+} from "../models/prescription.model";
+import {
+  ParsedPrescription,
+  validatePrescriptionParsedData,
+} from "../validation/prescription.validation";
 
 export const prescriptionParseService = async (text: string) => {
-  const prompt = `You are a medical prescription parser. Extract and structure the following information from the prescription text. Return ONLY a valid JSON object with exactly these fields:
+  if (!text || text.trim().length === 0) {
+    throw new Error("Prescription text is empty");
+  }
 
-{
-  "doctor": {
-    "name": "full name if available",
-    "specialization": "specialization if mentioned",
-    "license_number": "license number if provided",
-    "contact": "phone or email if available"
-  },
-  "patient": {
-    "name": "full name if available",
-    "age": "age if mentioned",
-    "gender": "M/F if mentioned",
-    "contact": "phone or email if available",
-    "registration_number": "patient ID or registration if available"
-  },
-  "symptoms": ["list of symptoms or chief complaints"],
-  "diagnosis": ["list of diagnoses"],
-  "tests": [
-    {
-      "name": "test name",
-      "type": "lab test type if identifiable"
-    }
-  ],
-  "medicines": [
-    {
-      "name": "medicine name",
-      "dosage": "dosage amount",
-      "frequency": "how often to take",
-      "duration": "how long to take",
-      "instructions": "any special instructions"
-    }
-  ],
-  "notes": "any additional notes or precautions"
-}
-
-If any field is not found in the text, use null for that field. Be thorough but accurate. Return ONLY the JSON object, no markdown, no extra text.
-
-Prescription Text:
-${text}`;
-
+  const prompt = getPrompt(text);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${appConfig.GEMINI_API_KEY}`;
 
   const payload = {
@@ -62,33 +35,105 @@ ${text}`;
     },
   };
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30000), // 30 second timeout
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(
+        `Gemini API error: ${response.status} - ${error || response.statusText}`
+      );
+    }
+
+    const data: any = await response.json();
+
+    // Validate Gemini response structure
+    if (
+      !data.candidates ||
+      !Array.isArray(data.candidates) ||
+      !data.candidates[0]
+    ) {
+      throw new Error(
+        "Invalid response structure from Gemini API: no candidates"
+      );
+    }
+
+    if (!data.candidates[0].content || !data.candidates[0].content.parts) {
+      throw new Error("Invalid response structure from Gemini API: no content");
+    }
+
+    const responseText = data.candidates[0].content.parts[0].text;
+
+    if (!responseText || typeof responseText !== "string") {
+      throw new Error("Gemini API returned empty or invalid text");
+    }
+
+    // Extract JSON from response (handles markdown code blocks and extra text)
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error(
+        "Could not parse JSON from prescription text. Response: " +
+          responseText.substring(0, 200)
+      );
+    }
+
+    let parsedData: any;
+    try {
+      parsedData = JSON.parse(jsonMatch[0]);
+    } catch (parseError) {
+      throw new Error(
+        `Failed to parse JSON: ${
+          parseError instanceof Error ? parseError.message : "Unknown error"
+        }`
+      );
+    }
+
+    // Validate parsed data structure
+    if (!validatePrescriptionParsedData(parsedData)) {
+      throw new Error("Parsed data does not match required schema");
+    }
+
+    // Additional validation: ensure medicines array has valid entries
+    if (parsedData.medicines.length > 0) {
+      parsedData.medicines = parsedData.medicines.filter(
+        (med: any) => med.name && med.name.trim().length > 0
+      );
+    }
+
+    // Ensure no duplicate symptoms/diagnosis
+    parsedData.symptoms = [...new Set(parsedData.symptoms.filter(Boolean))];
+    parsedData.diagnosis = [...new Set(parsedData.diagnosis.filter(Boolean))];
+
+    return parsedData as ParsedPrescription;
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`Prescription parsing failed: ${error.message}`);
+    }
+    throw new Error("Prescription parsing failed: Unknown error");
+  }
+};
+
+export const prescriptionCreateService = async (
+  data: Partial<IPrescriptionDocument>
+) => {
+  const prescription = new PrescriptionModel({
+    ...data,
+    processingStatus: "pending",
+    uploadedAt: new Date(),
   });
 
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Gemini API error: ${response.status} - ${error}`);
-  }
+  const saved = await prescription.save();
+  return saved;
+};
 
-  const data: any = await response.json();
-
-  if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
-    throw new Error("Invalid response from Gemini API");
-  }
-
-  const responseText = data.candidates[0].content.parts[0].text;
-
-  // Parse JSON from response
-  const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    throw new Error("Could not parse structured data from prescription");
-  }
-
-  const parsedData = JSON.parse(jsonMatch[0]);
-  return parsedData;
+export const prescriptionGetAllService = async () => {
+  const prescriptions = await PrescriptionModel.find({});
+  return prescriptions;
 };

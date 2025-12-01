@@ -1,8 +1,12 @@
 import { Request, Response } from "express";
 import fs from "fs/promises";
-import { extractText } from "../lib/ocr";
+import { extractTextFromImage } from "../lib/ocr";
 import { createServiceError, createSuccessResponse } from "../lib/utils";
-import { prescriptionParseService } from "../services/prescription.service";
+import {
+  prescriptionCreateService,
+  prescriptionGetAllService,
+  prescriptionParseService,
+} from "../services/prescription.service";
 
 export const prescriptionUploadController = async (
   req: Request,
@@ -13,8 +17,10 @@ export const prescriptionUploadController = async (
   }
 
   const imagePath = req.file.path;
-  const extractedText = await extractText(imagePath);
+  const extractedText = await extractTextFromImage(imagePath);
   const parsedData = await prescriptionParseService(extractedText);
+
+  await prescriptionCreateService({ ...parsedData, ocrText: extractedText });
 
   // Clean up uploaded file
   await fs.unlink(imagePath);
@@ -24,4 +30,13 @@ export const prescriptionUploadController = async (
     .json(
       createSuccessResponse(parsedData, "Prescription parsed successfully")
     );
+};
+
+export const prescriptionGetAllController = async (
+  _req: Request,
+  res: Response
+) => {
+  const data = await prescriptionGetAllService();
+
+  res.status(200).json(createSuccessResponse(data, "List of prescriptions"));
 };
