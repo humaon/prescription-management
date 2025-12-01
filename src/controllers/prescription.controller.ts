@@ -7,6 +7,8 @@ import {
   prescriptionGetAllService,
   prescriptionParseService,
 } from "../services/prescription.service";
+import mongoose from "mongoose";
+import { PrescriptionModel } from "../models/prescription.model";
 
 export const prescriptionUploadController = async (
   req: Request,
@@ -39,4 +41,36 @@ export const prescriptionGetAllController = async (
   const data = await prescriptionGetAllService();
 
   res.status(200).json(createSuccessResponse(data, "List of prescriptions"));
+};
+
+export const prescriptionGetByIdController = async (
+  req: Request,
+  res: Response
+) => {
+  const prescriptionId = req.params.id;
+
+  // Validate Mongo ObjectId
+  if (!mongoose.Types.ObjectId.isValid(prescriptionId)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid prescription ID",
+    });
+  }
+
+  // Find prescription owned by the user
+  const prescription = await PrescriptionModel.findOne({
+    _id: prescriptionId,
+  }).lean();
+
+  if (!prescription) {
+    return res.status(404).json({
+      success: false,
+      message: "Prescription not found",
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    data: prescription,
+  });
 };
