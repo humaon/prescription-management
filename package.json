@@ -37,7 +37,6 @@
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "passport-local": "^1.0.0",
-    "pdf-parse": "^2.4.5",
     "pdf-parse-new": "^1.4.1",
     "tesseract.js": "^6.0.1"
   }
