@@ -1,4 +1,4 @@
-import mongoose, { Schema, Document } from "mongoose";
+import mongoose, { Schema, Document, Types } from "mongoose";
 
 export interface IDoctorInfo {
   name: string | null;
@@ -29,6 +29,7 @@ export interface IMedicine {
 }
 
 export interface IPrescriptionDocument extends Document {
+  userId: Types.ObjectId;
   doctor: IDoctorInfo;
   patient: IPatientInfo;
   symptoms: string[];
@@ -37,6 +38,8 @@ export interface IPrescriptionDocument extends Document {
   medicines: IMedicine[];
   notes?: string | null;
   ocrText: string;
+  isCurrent: boolean;
+  status: "draft" | "confirmed"; // ADDED for draft/confirmed workflow
   processingStatus: "pending" | "processing" | "completed" | "failed";
   errorMessage?: string | null;
   uploadedAt: Date;
@@ -97,6 +100,14 @@ const MedicineSchema = new Schema<IMedicine>(
 // Main Prescription Schema
 const PrescriptionSchema = new Schema<IPrescriptionDocument>(
   {
+    // User Reference
+    userId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+
     // Doctor Information
     doctor: { type: DoctorInfoSchema, required: true },
 
@@ -119,6 +130,21 @@ const PrescriptionSchema = new Schema<IPrescriptionDocument>(
     // OCR Data
     ocrText: { type: String, required: true },
 
+    // Current Status
+    isCurrent: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
+
+    // Draft/Confirmed Status - ADDED
+    status: {
+      type: String,
+      enum: ["draft", "confirmed"],
+      default: "draft",
+      index: true,
+    },
+
     // Processing Status
     processingStatus: {
       type: String,
@@ -137,6 +163,26 @@ const PrescriptionSchema = new Schema<IPrescriptionDocument>(
     timestamps: true, // Adds createdAt and updatedAt automatically
   }
 );
+
+// Compound index for user + status + upload date - ADDED
+PrescriptionSchema.index({
+  userId: 1,
+  status: 1,
+  uploadedAt: -1,
+});
+
+// Compound index for user + current status queries
+PrescriptionSchema.index({
+  userId: 1,
+  isCurrent: 1,
+  uploadedAt: -1,
+});
+
+// Compound index for user + processing status
+PrescriptionSchema.index({
+  userId: 1,
+  processingStatus: 1,
+});
 
 // Add text index for full-text search
 PrescriptionSchema.index({

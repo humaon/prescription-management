@@ -2,6 +2,8 @@ import app from "./app";
 import { runStartupTasks } from "./bootstrap/startup";
 import { appConfig } from "./config/app.config";
 import { connectDatabase } from "./config/db.config";
+import { initializeReminderSchedulers } from "../src/jobs/reminderScheduler";
+
 
 const startServer = async () => {
   // Startup lifecycle
@@ -9,6 +11,8 @@ const startServer = async () => {
 
   // Database connection
   await connectDatabase();
+  initializeReminderSchedulers();
+
 
   app.listen(appConfig.PORT, () => {
     console.log(
