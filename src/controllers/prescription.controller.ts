@@ -15,6 +15,7 @@ import {
   togglePrescriptionCurrentStatus,
   getUserRemindersService,
   getPrescriptionStatsService,
+   getHealthInsightsService
 } from "../services/prescription.service";
 
 // Step 1: Upload and parse (returns data for user to review/edit)
@@ -296,3 +297,22 @@ export const getPrescriptionStatsController = async (
     .status(200)
     .json(createSuccessResponse(stats, "Prescription statistics retrieved"));
 };
+export const getHealthInsightsController = async (
+  req: Request,
+  res: Response
+) => {
+  if (!req.userId) {
+    throw createServiceError("User not authenticated", 401);
+  }
+
+  const insights = await getHealthInsightsService(req.userId);
+
+  res
+    .status(200)
+    .json(
+      createSuccessResponse(
+        insights,
+        "Health insights retrieved successfully"
+      )
+    );
+}

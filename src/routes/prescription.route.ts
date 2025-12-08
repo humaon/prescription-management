@@ -13,6 +13,7 @@ import {
   prescriptionDeleteByIdController,
   togglePrescriptionStatusController,
   getPrescriptionStatsController,
+  getHealthInsightsController
 } from "../controllers/prescription.controller";
 
 const router = express.Router();
@@ -26,6 +27,7 @@ router.post("/upload", upload.single("prescription"), prescriptionUploadControll
 
 // Save prescription after user reviews/edits the parsed data
 router.post("/save", prescriptionSaveController);
+router.get("/insights", getHealthInsightsController);
 
 // Get prescription statistics
 router.get("/stats", getPrescriptionStatsController);
@@ -53,5 +55,6 @@ router.delete("/:id", prescriptionDeleteByIdController);
 
 // Toggle prescription status (current/archived)
 router.patch("/:id/toggle-status", togglePrescriptionStatusController);
+
 
 export default router;

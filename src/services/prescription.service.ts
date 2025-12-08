@@ -446,3 +446,212 @@ export const getPrescriptionStatsService = async (userId: string) => {
     byStatus: stats[0]?.byStatus || [],
   };
 };
+export interface IHealthInsights {
+  mostUsedMedicines: Array<{
+    name: string;
+    genericName?: string;
+    count: number;
+    percentage: number;
+  }>;
+  commonSymptoms: Array<{
+    symptom: string;
+    count: number;
+    percentage: number;
+  }>;
+  treatmentStats: {
+    totalPrescriptions: number;
+    activeMedications: number;
+    doctorsConsulted: number;
+    archivedPrescriptions: number;
+  };
+  medicationTrends: {
+    currentMonthPrescriptions: number;
+    lastMonthPrescriptions: number;
+    changePercentage: number;
+  };
+  topDoctors: Array<{
+    name: string;
+    specialization: string | null;
+    consultationCount: number;
+  }>;
+  recentDiagnoses: string[];
+}
+
+// Helper functions
+const extractGenericName = (medicineName: string): string | undefined => {
+  const match = medicineName.match(/\(([^)]+)\)/);
+  return match ? match[1].trim() : undefined;
+};
+
+const capitalizeFirst = (str: string): string => {
+  return str.charAt(0).toUpperCase() + str.slice(1);
+};
+
+// Main service function
+export const getHealthInsightsService = async (
+  userId: string
+): Promise<IHealthInsights> => {
+  const prescriptions = await PrescriptionModel.find({
+    userId: new Types.ObjectId(userId),
+    status: "confirmed",
+  })
+    .sort({ uploadedAt: -1 })
+    .lean();
+
+  const now = new Date();
+  const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
+
+  // Most used medicines
+  const medicineCount = new Map<string, number>();
+  prescriptions.forEach((prescription) => {
+    prescription.medicines.forEach((medicine) => {
+      const medicineName = medicine.name.trim();
+      medicineCount.set(medicineName, (medicineCount.get(medicineName) || 0) + 1);
+    });
+  });
+
+  const totalMedicineInstances = Array.from(medicineCount.values()).reduce(
+    (sum, count) => sum + count,
+    0
+  );
+
+  const mostUsedMedicines = Array.from(medicineCount.entries())
+    .map(([name, count]) => ({
+      name,
+      genericName: extractGenericName(name),
+      count,
+      percentage: totalMedicineInstances > 0 ? Math.round((count / totalMedicineInstances) * 100) : 0,
+    }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+
+  // Common symptoms
+  const symptomCount = new Map<string, number>();
+  prescriptions.forEach((prescription) => {
+    prescription.symptoms.forEach((symptom) => {
+      const normalizedSymptom = symptom.trim().toLowerCase();
+      if (normalizedSymptom) {
+        symptomCount.set(normalizedSymptom, (symptomCount.get(normalizedSymptom) || 0) + 1);
+      }
+    });
+  });
+
+  const totalSymptomInstances = Array.from(symptomCount.values()).reduce(
+    (sum, count) => sum + count,
+    0
+  );
+
+  const commonSymptoms = Array.from(symptomCount.entries())
+    .map(([symptom, count]) => ({
+      symptom: capitalizeFirst(symptom),
+      count,
+      percentage: totalSymptomInstances > 0 ? Math.round((count / totalSymptomInstances) * 100) : 0,
+    }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+
+  // Treatment stats
+  const activeMedicationsSet = new Set<string>();
+  const doctorNamesSet = new Set<string>();
+
+  prescriptions.forEach((prescription) => {
+    if (prescription.isCurrent) {
+      prescription.medicines.forEach((medicine) => {
+        activeMedicationsSet.add(medicine.name.trim());
+      });
+    }
+    if (prescription.doctor?.name) {
+      doctorNamesSet.add(prescription.doctor.name.trim());
+    }
+  });
+
+  const treatmentStats = {
+    totalPrescriptions: prescriptions.length,
+    activeMedications: activeMedicationsSet.size,
+    doctorsConsulted: doctorNamesSet.size,
+    archivedPrescriptions: prescriptions.filter((p) => !p.isCurrent).length,
+  };
+
+  // Medication trends
+  const currentMonthPrescriptions = prescriptions.filter(
+    (p) => new Date(p.uploadedAt) >= currentMonthStart
+  ).length;
+
+  const lastMonthPrescriptions = prescriptions.filter(
+    (p) =>
+      new Date(p.uploadedAt) >= lastMonthStart &&
+      new Date(p.uploadedAt) <= lastMonthEnd
+  ).length;
+
+  const changePercentage =
+    lastMonthPrescriptions > 0
+      ? Math.round(((currentMonthPrescriptions - lastMonthPrescriptions) / lastMonthPrescriptions) * 100)
+      : currentMonthPrescriptions > 0
+      ? 100
+      : 0;
+
+  const medicationTrends = {
+    currentMonthPrescriptions,
+    lastMonthPrescriptions,
+    changePercentage,
+  };
+
+  // Top doctors
+  const doctorConsultations = new Map<
+    string,
+    { name: string; specialization: string | null; count: number }
+  >();
+
+  prescriptions.forEach((prescription) => {
+    if (prescription.doctor?.name) {
+      const doctorName = prescription.doctor.name.trim();
+      const existing = doctorConsultations.get(doctorName);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        doctorConsultations.set(doctorName, {
+          name: doctorName,
+          specialization: prescription.doctor.specialization || null,
+          count: 1,
+        });
+      }
+    }
+  });
+
+  const topDoctors = Array.from(doctorConsultations.values())
+    .map((doc) => ({
+      name: doc.name,
+      specialization: doc.specialization,
+      consultationCount: doc.count,
+    }))
+    .sort((a, b) => b.consultationCount - a.consultationCount)
+    .slice(0, 5);
+
+  // Recent diagnoses
+  const recentDiagnosesSet = new Set<string>();
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+  prescriptions
+    .filter((p) => new Date(p.uploadedAt) >= sixMonthsAgo)
+    .forEach((prescription) => {
+      prescription.diagnosis.forEach((diag) => {
+        if (diag && diag.trim()) {
+          recentDiagnosesSet.add(diag.trim());
+        }
+      });
+    });
+
+  const recentDiagnoses = Array.from(recentDiagnosesSet).slice(0, 10);
+
+  return {
+    mostUsedMedicines,
+    commonSymptoms,
+    treatmentStats,
+    medicationTrends,
+    topDoctors,
+    recentDiagnoses,
+  };
+}
