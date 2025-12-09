@@ -2,7 +2,7 @@ import app from "./app";
 import { runStartupTasks } from "./bootstrap/startup";
 import { appConfig } from "./config/app.config";
 import { connectDatabase } from "./config/db.config";
-import { initializeReminderSchedulers } from "../src/jobs/reminderScheduler";
+import { initializeReminderSchedulers } from "./jobs/reminderScheduler";
 import { initializeFirebase } from "./services/notification.service";
 
 const startServer = async () => {
