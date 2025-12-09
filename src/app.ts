@@ -10,6 +10,9 @@ import userRoutes from "./routes/user.route";
 import prescriptionRoutes from "./routes/prescription.route";
 import morgan from "morgan";
 import fcmRoutes from "./routes/fcm.route";
+import testNotificationRoutes from "./routes/notificationTest.route";
+
+
 
 const app = express();
 
@@ -35,6 +38,8 @@ app.use(`/auth`, authRoutes);
 app.use(`${appConfig.BASE_PATH}/users`, userRoutes);
 app.use(`${appConfig.BASE_PATH}/prescriptions`, prescriptionRoutes);
 app.use(`${appConfig.BASE_PATH}/fcm`, fcmRoutes); 
+app.use("/test", testNotificationRoutes);
+
 
 // Error handler
 app.use(errorHandler);
