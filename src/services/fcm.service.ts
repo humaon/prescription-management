@@ -1,31 +1,41 @@
-// CREATE NEW FILE: src/services/fcm.service.ts
-
+// src/services/fcm.service.ts (FIXED)
 import { Types } from "mongoose";
-import { UserModel } from "../models/user.model";
+import { User, IUser, IDeviceToken } from "../models/user.model"; // Fixed import
 
-export interface RegisterTokenInput {
+export interface RegisterFCMTokenInput {
   userId: string;
   token: string;
   platform: "android" | "ios" | "web";
   deviceId: string;
 }
 
-export const registerFCMToken = async (input: RegisterTokenInput) => {
+/**
+ * Register or update FCM token for a user
+ */
+export const registerFCMToken = async (
+  input: RegisterFCMTokenInput
+): Promise<void> => {
   const { userId, token, platform, deviceId } = input;
 
-  const user = await UserModel.findById(userId);
-  if (!user) throw new Error("User not found");
+  const user = await User.findById(new Types.ObjectId(userId));
 
-  const existingDeviceIndex = user.deviceTokens.findIndex(
-    (dt) => dt.deviceId === deviceId
+  if (!user) {
+    throw new Error("User not found");
+  }
+
+  // Check if device already exists
+  const existingDevice = user.deviceTokens.find(
+    (dt: IDeviceToken) => dt.deviceId === deviceId
   );
 
-  if (existingDeviceIndex !== -1) {
-    user.deviceTokens[existingDeviceIndex].token = token;
-    user.deviceTokens[existingDeviceIndex].platform = platform;
-    user.deviceTokens[existingDeviceIndex].lastUsed = new Date();
-    user.deviceTokens[existingDeviceIndex].isActive = true;
+  if (existingDevice) {
+    // Update existing device token
+    existingDevice.token = token;
+    existingDevice.platform = platform;
+    existingDevice.lastUsed = new Date();
+    existingDevice.isActive = true;
   } else {
+    // Add new device token
     user.deviceTokens.push({
       token,
       platform,
@@ -36,101 +46,114 @@ export const registerFCMToken = async (input: RegisterTokenInput) => {
   }
 
   await user.save();
-  return { message: "FCM token registered successfully", deviceId, platform };
 };
 
-export const removeFCMToken = async (userId: string, deviceId: string) => {
-  const user = await UserModel.findById(userId);
-  if (!user) throw new Error("User not found");
+/**
+ * Remove FCM token (on logout)
+ */
+export const removeFCMToken = async (
+  userId: string,
+  deviceId: string
+): Promise<void> => {
+  const user = await User.findById(new Types.ObjectId(userId));
 
-  user.deviceTokens = user.deviceTokens.filter((dt) => dt.deviceId !== deviceId);
+  if (!user) {
+    throw new Error("User not found");
+  }
+
+  user.deviceTokens = user.deviceTokens.filter((dt: IDeviceToken) => dt.deviceId !== deviceId);
+
   await user.save();
-
-  return { message: "FCM token removed successfully" };
 };
 
-export const deactivateFCMToken = async (token: string) => {
-  const user = await UserModel.findOne({ "deviceTokens.token": token });
-  if (!user) return;
+/**
+ * Deactivate a specific FCM token (when it's invalid)
+ */
+export const deactivateFCMToken = async (token: string): Promise<void> => {
+  const user = await User.findOne({ "deviceTokens.token": token });
 
-  const deviceToken = user.deviceTokens.find((dt) => dt.token === token);
+  if (!user) {
+    return;
+  }
+
+  const deviceToken = user.deviceTokens.find((dt: IDeviceToken) => dt.token === token);
+
   if (deviceToken) {
     deviceToken.isActive = false;
     await user.save();
   }
 };
 
-export const getUserFCMTokens = async (
-  userId: string | Types.ObjectId
-): Promise<string[]> => {
-  const user = await UserModel.findById(userId);
-  if (!user) return [];
+/**
+ * Get all active FCM tokens for a user
+ */
+export const getUserFCMTokens = async (userId: string): Promise<string[]> => {
+  const user = await User.findById(new Types.ObjectId(userId));
 
-  if (
-    !user.notificationSettings?.enabled ||
-    !user.notificationSettings?.pushNotifications ||
-    !user.notificationSettings?.medicationReminders
-  ) {
+  if (!user || !user.notificationSettings.pushNotifications) {
     return [];
   }
 
-  return user.deviceTokens.filter((dt) => dt.isActive).map((dt) => dt.token);
+  return user.deviceTokens.filter((dt: IDeviceToken) => dt.isActive).map((dt: IDeviceToken) => dt.token);
 };
 
+/**
+ * Update user notification settings
+ */
 export const updateNotificationSettings = async (
   userId: string,
-  settings: {
-    enabled?: boolean;
-    medicationReminders?: boolean;
-    emailNotifications?: boolean;
-    pushNotifications?: boolean;
-  }
-) => {
-  const user = await UserModel.findById(userId);
-  if (!user) throw new Error("User not found");
-
-  if (!user.notificationSettings) {
-    user.notificationSettings = {
-      enabled: true,
-      medicationReminders: true,
-      emailNotifications: false,
-      pushNotifications: true,
-    };
-  }
-
-  Object.assign(user.notificationSettings, settings);
-  await user.save();
-
-  return user.notificationSettings;
+  settings: Partial<IUser["notificationSettings"]>
+): Promise<void> => {
+  await User.findByIdAndUpdate(
+    new Types.ObjectId(userId),
+    {
+      $set: {
+        "notificationSettings.enabled":
+          settings.enabled ?? undefined,
+        "notificationSettings.medicationReminders":
+          settings.medicationReminders ?? undefined,
+        "notificationSettings.emailNotifications":
+          settings.emailNotifications ?? undefined,
+        "notificationSettings.pushNotifications":
+          settings.pushNotifications ?? undefined,
+      },
+    },
+    { new: true }
+  );
 };
 
-export const getNotificationSettings = async (userId: string) => {
-  const user = await UserModel.findById(userId).select("notificationSettings");
-  if (!user) throw new Error("User not found");
+/**
+ * Get user notification settings
+ */
+export const getNotificationSettings = async (
+  userId: string
+): Promise<IUser["notificationSettings"] | null> => {
+  const user = await User.findById(new Types.ObjectId(userId)).select(
+    "notificationSettings"
+  );
 
-  return user.notificationSettings || {
-    enabled: true,
-    medicationReminders: true,
-    emailNotifications: false,
-    pushNotifications: true,
-  };
+  return user?.notificationSettings || null;
 };
 
-export const cleanupInactiveTokens = async () => {
+/**
+ * Clean up inactive tokens (run daily via cron)
+ */
+export const cleanupInactiveTokens = async (): Promise<void> => {
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-  const result = await UserModel.updateMany(
+  // Remove tokens not used in 30 days
+  await User.updateMany(
     {},
     {
       $pull: {
         deviceTokens: {
-          $or: [{ isActive: false }, { lastUsed: { $lt: thirtyDaysAgo } }]
-        }
-      }
+          lastUsed: { $lt: thirtyDaysAgo },
+          isActive: false,
+        },
+      },
     }
   );
 
-  console.log(`✅ Cleaned up inactive tokens: ${result.modifiedCount} users updated`);
-  return result;
+  console.log("✅ Cleaned up inactive FCM tokens");
 };
