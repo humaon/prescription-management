@@ -3,7 +3,7 @@ import { runStartupTasks } from "./bootstrap/startup";
 import { appConfig } from "./config/app.config";
 import { connectDatabase } from "./config/db.config";
 import { initializeReminderSchedulers } from "../src/jobs/reminderScheduler";
-
+import { initializeFirebase } from "./services/notification.service";
 
 const startServer = async () => {
   // Startup lifecycle
@@ -11,6 +11,13 @@ const startServer = async () => {
 
   // Database connection
   await connectDatabase();
+   try {
+    initializeFirebase();
+    console.log("✅ Firebase initialized for push notifications");
+  } catch (error) {
+    console.error("⚠️  Firebase initialization failed:", error);
+    console.log("   App will continue without push notifications");
+  }
   initializeReminderSchedulers();
 
 
