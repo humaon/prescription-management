@@ -60,9 +60,9 @@ export const sendMedicationReminder = async (
     android: {
       priority: "high",
       notification: {
-        channelId: "medication_reminders",
+        "channelId": "alarm_channel",
+        "sound": "alarm_sound",
         priority: "high",
-        sound: "default",
         icon: "ic_medication",
         color: "#4CAF50",
         tag: `med_${notification.medicineName}`,
