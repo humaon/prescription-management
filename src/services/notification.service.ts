@@ -9,7 +9,8 @@ export const initializeFirebase = () => {
   if (firebaseInitialized) return;
 
   try {
-    const serviceAccount = require("../config/firebase-service-account.json");
+  const path = require('path');
+const serviceAccount = require(path.join(__dirname, '..', 'config', 'firebase-service-account.json'));
     
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),

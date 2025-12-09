@@ -4,9 +4,10 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js",
-     "gcp-build": "npm run build"
+    "build": "tsc  && npm run copy-files",
+ "copy-files": "node -e \"require('fs').cpSync('src/config', 'dist/config', {recursive: true})\"",  
+   "start": "npm run build && npm run copy-firebase-config && node dist/index.js",
+    "gcp-build": "npm run build"
   },
   "engines": {
     "node": "20.x",
@@ -28,6 +29,7 @@
     "@types/passport": "^1.0.17",
     "@types/passport-google-oauth20": "^2.0.17",
     "@types/passport-local": "^1.0.38",
+    "copyfiles": "^2.4.1",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.9.3"
   },

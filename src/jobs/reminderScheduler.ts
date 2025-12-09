@@ -2,11 +2,10 @@
 import cron from "node-cron";
 import { getDueRemindersService } from "../services/prescription.service";
 import { ReminderModel } from "../models/reminder.model";
-import {
-  sendMedicationReminder,
-  MedicationNotification,
-} from "../services/notification.service";
+
+import { sendMedicationReminder, MedicationNotification } from "../services/notification.service";
 import { getUserFCMTokens, deactivateFCMToken } from "../services/fcm.service";
+
 
 /**
  * Send notification to user for medication reminder
