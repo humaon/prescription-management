@@ -9,6 +9,7 @@ import authRoutes from "./routes/auth.route";
 import userRoutes from "./routes/user.route";
 import prescriptionRoutes from "./routes/prescription.route";
 import morgan from "morgan";
+import fcmRoutes from "./routes/fcm.route";
 
 const app = express();
 
@@ -33,6 +34,7 @@ app.get(`${appConfig.BASE_PATH}/health`, (_req, res) => {
 app.use(`/auth`, authRoutes);
 app.use(`${appConfig.BASE_PATH}/users`, userRoutes);
 app.use(`${appConfig.BASE_PATH}/prescriptions`, prescriptionRoutes);
+app.use(`${appConfig.BASE_PATH}/fcm`, fcmRoutes); 
 
 // Error handler
 app.use(errorHandler);
