@@ -2,7 +2,6 @@ import app from "./app";
 import { runStartupTasks } from "./bootstrap/startup";
 import { appConfig } from "./config/app.config";
 import { connectDatabase } from "./config/db.config";
-import { initializeReminderSchedulers } from "./jobs/reminderScheduler";
 import { initializeFirebase } from "./services/notification.service";
 
 const startServer = async () => {
@@ -18,7 +17,6 @@ const startServer = async () => {
     console.error("⚠️  Firebase initialization failed:", error);
     console.log("   App will continue without push notifications");
   }
-  initializeReminderSchedulers();
 
 
   app.listen(appConfig.PORT, () => {
