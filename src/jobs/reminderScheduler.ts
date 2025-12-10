@@ -17,7 +17,8 @@ const sendNotification = async (
   try {
     console.log(`📲 Sending notification to user ${userId} for ${medicineName} (${dosage}) at ${timeSlot}`);
     const fcmTokens = await getUserFCMTokens(userId);
-    console.log(`🔔 Found ${fcmTokens.length} FCM tokens for user ${userId}`,fcmTokens);
+    console.log(`🔔 Found ${fcmTokens.length} FCM tokens for user ${userId}`, fcmTokens);
+    
     if (fcmTokens.length === 0) {
       console.log(`⚠️ No active FCM tokens for user ${userId}`);
       return;
@@ -57,17 +58,24 @@ const sendNotification = async (
 };
 
 /**
- * Run reminders for a specific time slot
+ * Run reminders for a specific time slot (exported for individual endpoints)
  */
-const runRemindersForTimeSlot = async (timeSlot: "morning" | "noon" | "night") => {
+export const runRemindersForTimeSlot = async (timeSlot: "morning" | "noon" | "night") => {
+  console.log(`⏰ Starting ${timeSlot} reminder job at ${new Date().toISOString()}`);
+  
   const reminders = await getDueRemindersService(timeSlot);
-  if (reminders.length === 0) return 0;
+  
+  if (reminders.length === 0) {
+    console.log(`📭 No ${timeSlot} reminders to send`);
+    return 0;
+  }
+
+  console.log(`📬 Found ${reminders.length} ${timeSlot} reminders to process`);
 
   for (const reminder of reminders) {
-    console.log(reminder);
     if (!reminder.userId) {
       console.warn(`⚠️ Reminder ${reminder._id} has no userId, skipping`);
-      continue; // skip this invalid reminder
+      continue;
     }
   
     await sendNotification(
@@ -84,11 +92,12 @@ const runRemindersForTimeSlot = async (timeSlot: "morning" | "noon" | "night") =
     });
   }
 
+  console.log(`✅ Processed ${reminders.length} ${timeSlot} reminders`);
   return reminders.length;
 };
 
 /**
- * Run all reminders
+ * Run all reminders (kept for backwards compatibility or manual triggers)
  */
 export const runAllReminders = async () => {
   const morning = await runRemindersForTimeSlot("morning");
@@ -96,12 +105,16 @@ export const runAllReminders = async () => {
   const night = await runRemindersForTimeSlot("night");
 
   console.log(`✅ Reminders sent: Morning(${morning}) Noon(${noon}) Night(${night})`);
+  
+  return { morning, noon, night };
 };
 
 /**
  * Cleanup jobs
  */
 export const runCleanupJobs = async () => {
+  console.log(`🧹 Starting cleanup job at ${new Date().toISOString()}`);
+  
   // Expired reminders
   const now = new Date();
   const expired = await ReminderModel.updateMany(
@@ -113,4 +126,6 @@ export const runCleanupJobs = async () => {
   // Invalid FCM tokens
   await cleanupInactiveTokens();
   console.log("🧹 FCM token cleanup done");
+  
+  return { expiredReminders: expired.modifiedCount };
 };

@@ -13,6 +13,26 @@ import { ReminderModel } from "../models/reminder.model";
 import { parseDosageSchedule } from "../lib/dosageParser";
 
 // Parse prescription text using Gemini API
+
+const normalizeBanglaDosage = (dosage: string): string => {
+  if (!dosage || typeof dosage !== "string") {
+    return dosage;
+  }
+
+  const banglaToEnglish: { [key: string]: string } = {
+    '০': '0',
+    '১': '1',
+  };
+
+  let result = dosage;
+  Object.entries(banglaToEnglish).forEach(([bangla, english]) => {
+    result = result.replace(new RegExp(bangla, 'g'), english);
+  });
+
+  return result;
+};
+
+// Parse prescription text using Gemini API
 export const prescriptionParseService = async (
   text: string
 ): Promise<ParsedPrescription> => {
@@ -104,9 +124,13 @@ export const prescriptionParseService = async (
     }
 
     if (parsedData.medicines.length > 0) {
-      parsedData.medicines = parsedData.medicines.filter(
-        (med: any) => med.name && med.name.trim().length > 0
-      );
+      parsedData.medicines = parsedData.medicines
+        .filter((med: any) => med.name && med.name.trim().length > 0)
+        .map((med: any) => ({
+          ...med,
+          // Normalize Bangla digits to English in dosage
+          dosage: med.dosage ? normalizeBanglaDosage(med.dosage) : med.dosage,
+        }));
     }
 
     parsedData.symptoms = [...new Set(parsedData.symptoms.filter(Boolean))];
@@ -120,6 +144,116 @@ export const prescriptionParseService = async (
     throw new Error("Prescription parsing failed: Unknown error");
   }
 };
+
+
+
+// export const prescriptionParseService = async (
+//   text: string
+// ): Promise<ParsedPrescription> => {
+//   if (!text || text.trim().length === 0) {
+//     throw new Error("Prescription text is empty");
+//   }
+
+//   const prompt = getPrompt(text);
+//   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${appConfig.GEMINI_API_KEY}`;
+
+//   const payload = {
+//     contents: [
+//       {
+//         parts: [
+//           {
+//             text: prompt,
+//           },
+//         ],
+//       },
+//     ],
+//     generationConfig: {
+//       temperature: 0.1,
+//       topP: 0.95,
+//       topK: 40,
+//       maxOutputTokens: 2048,
+//     },
+//   };
+
+//   try {
+//     const response = await fetch(url, {
+//       method: "POST",
+//       headers: {
+//         "Content-Type": "application/json",
+//       },
+//       body: JSON.stringify(payload),
+//       signal: AbortSignal.timeout(30000),
+//     });
+
+//     if (!response.ok) {
+//       const error = await response.text();
+//       throw new Error(
+//         `Gemini API error: ${response.status} - ${error || response.statusText}`
+//       );
+//     }
+
+//     const data: any = await response.json();
+
+//     if (
+//       !data.candidates ||
+//       !Array.isArray(data.candidates) ||
+//       !data.candidates[0]
+//     ) {
+//       throw new Error(
+//         "Invalid response structure from Gemini API: no candidates"
+//       );
+//     }
+
+//     if (!data.candidates[0].content || !data.candidates[0].content.parts) {
+//       throw new Error("Invalid response structure from Gemini API: no content");
+//     }
+
+//     const responseText = data.candidates[0].content.parts[0].text;
+
+//     if (!responseText || typeof responseText !== "string") {
+//       throw new Error("Gemini API returned empty or invalid text");
+//     }
+
+//     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+//     if (!jsonMatch) {
+//       throw new Error(
+//         "Could not parse JSON from prescription text. Response: " +
+//           responseText.substring(0, 200)
+//       );
+//     }
+
+//     let parsedData: any;
+//     try {
+//       parsedData = JSON.parse(jsonMatch[0]);
+//     } catch (parseError) {
+//       throw new Error(
+//         `Failed to parse JSON: ${
+//           parseError instanceof Error ? parseError.message : "Unknown error"
+//         }`
+//       );
+//     }
+
+//     if (!validatePrescriptionParsedData(parsedData)) {
+//       throw new Error("Parsed data does not match required schema");
+//     }
+
+//     if (parsedData.medicines.length > 0) {
+//       parsedData.medicines = parsedData.medicines.filter(
+//         (med: any) => med.name && med.name.trim().length > 0
+//       );
+//     }
+
+//     parsedData.symptoms = [...new Set(parsedData.symptoms.filter(Boolean))];
+//     parsedData.diagnosis = [...new Set(parsedData.diagnosis.filter(Boolean))];
+
+//     return parsedData as ParsedPrescription;
+//   } catch (error) {
+//     if (error instanceof Error) {
+//       throw new Error(`Prescription parsing failed: ${error.message}`);
+//     }
+//     throw new Error("Prescription parsing failed: Unknown error");
+//   }
+// };
 
 // Helper: Calculate end date from duration string
 const calculateEndDate = (duration: string): Date | null => {
