@@ -15,7 +15,9 @@ const sendNotification = async (
   prescriptionId?: string
 ) => {
   try {
+    console.log(`📲 Sending notification to user ${userId} for ${medicineName} (${dosage}) at ${timeSlot}`);
     const fcmTokens = await getUserFCMTokens(userId);
+    console.log(`🔔 Found ${fcmTokens.length} FCM tokens for user ${userId}`,fcmTokens);
     if (fcmTokens.length === 0) {
       console.log(`⚠️ No active FCM tokens for user ${userId}`);
       return;
@@ -62,14 +64,21 @@ const runRemindersForTimeSlot = async (timeSlot: "morning" | "noon" | "night") =
   if (reminders.length === 0) return 0;
 
   for (const reminder of reminders) {
+    console.log(reminder);
+    if (!reminder.userId) {
+      console.warn(`⚠️ Reminder ${reminder._id} has no userId, skipping`);
+      continue; // skip this invalid reminder
+    }
+  
     await sendNotification(
-      reminder.userId.toString(),
+      reminder?.userId?._id.toString(),
       reminder.medicineName,
       reminder.dosage,
       timeSlot,
       reminder.prescriptionId?.toString()
     );
-
+  
+    // Update last notified timestamp
     await ReminderModel.findByIdAndUpdate(reminder._id, {
       lastNotifiedAt: new Date(),
     });
