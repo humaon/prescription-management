@@ -64,6 +64,7 @@ export const runRemindersForTimeSlot = async (timeSlot: "morning" | "noon" | "ni
   console.log(`⏰ Starting ${timeSlot} reminder job at ${new Date().toISOString()}`);
   
   const reminders = await getDueRemindersService(timeSlot);
+  console.log(`🔍 Retrieved ${reminders.length} due reminders for ${timeSlot}`);
   
   if (reminders.length === 0) {
     console.log(`📭 No ${timeSlot} reminders to send`);
