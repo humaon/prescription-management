@@ -11,6 +11,7 @@ export interface IReminderDocument extends Document {
     noon: boolean;
     night: boolean;
   };
+  
   timings: {
     morning: string; // "08:00"
     noon: string; // "13:00"
