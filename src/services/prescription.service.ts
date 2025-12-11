@@ -789,3 +789,4 @@ export const getHealthInsightsService = async (
     recentDiagnoses,
   };
 }
+
