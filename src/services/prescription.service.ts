@@ -295,7 +295,7 @@ const createRemindersForMedicines = async (
   for (const medicine of medicines) {
     if (!medicine.dosage) continue;
 
-    const schedule = parseDosageSchedule(medicine.dosage);
+    const schedule = parseDosageSchedule(medicine.frequency || medicine.dosage);
 
     if (schedule.totalDoses > 0) {
       const reminder = new ReminderModel({
