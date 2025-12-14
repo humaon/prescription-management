@@ -426,6 +426,7 @@ export const getActiveMedicationsService = async (userId: string) => {
   const currentPrescriptions = await PrescriptionModel.find({
     userId: new Types.ObjectId(userId),
     isCurrent: true,
+    isComplete: false, 
   })
     .select("medicines doctor uploadedAt patient _id")
     .sort({ uploadedAt: -1 })
@@ -789,4 +790,73 @@ export const getHealthInsightsService = async (
     recentDiagnoses,
   };
 }
+export const prescriptionGetByIdService = async (
+  prescriptionId: string,
+  userId: string
+) => {
+  const prescription = await PrescriptionModel.findOne({
+    _id: new Types.ObjectId(prescriptionId),
+    userId: new Types.ObjectId(userId),
+  }).lean();
 
+  return prescription;
+};
+
+/**
+ * NEW: Get prescription details with related data (reminders, feedback, test status)
+ */
+export const getPrescriptionDetailsService = async (
+  prescriptionId: string,
+  userId: string
+) => {
+  // Get prescription
+  const prescription = await PrescriptionModel.findOne({
+    _id: new Types.ObjectId(prescriptionId),
+    userId: new Types.ObjectId(userId),
+  }).lean();
+
+  if (!prescription) {
+    return null;
+  }
+
+  // Get reminders for this prescription
+  const reminders = await ReminderModel.find({
+    prescriptionId: new Types.ObjectId(prescriptionId),
+  }).lean();
+
+  // Get feedback (if completed)
+  const feedback = await PrescriptionFeedbackModel.findOne({
+    prescriptionId: new Types.ObjectId(prescriptionId),
+  }).lean();
+
+  // Calculate test statistics
+  const testStats = {
+    total: prescription.tests.length,
+    pending: prescription.tests.filter((t: any) => t.status === "pending").length,
+    completed: prescription.tests.filter((t: any) => t.status === "completed").length,
+    cancelled: prescription.tests.filter((t: any) => t.status === "cancelled").length,
+  };
+
+  // Check if all tests are completed
+  const allTestsCompleted =
+    prescription.tests.length === 0 ||
+    prescription.tests.every(
+      (t: any) => t.status === "completed" || t.status === "cancelled"
+    );
+
+  return {
+    prescription,
+    reminders: {
+      total: reminders.length,
+      active: reminders.filter((r) => r.isActive).length,
+      list: reminders,
+    },
+    tests: {
+      ...testStats,
+      allCompleted: allTestsCompleted,
+      list: prescription.tests,
+    },
+    feedback: feedback || null,
+    canComplete: allTestsCompleted && !prescription.isComplete,
+  };
+};
