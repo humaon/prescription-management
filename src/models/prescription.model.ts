@@ -18,6 +18,11 @@ export interface IPatientInfo {
 export interface ITest {
   name: string;
   type?: string | null;
+  status: "pending",              // NEW: pending | completed | cancelled
+  completedDate: null,             // NEW: When test was done
+  reportUrl: null,                 // NEW: S3 URL for report
+  resultSummary: null,             // NEW: "Blood sugar: 95 mg/dL"
+  notes: null         
 }
 
 export interface IMedicine {
@@ -39,6 +44,8 @@ export interface IPrescriptionDocument extends Document {
   notes?: string | null;
   ocrText: string;
   isCurrent: boolean;
+  isComplete: boolean;
+  completedAt?: Date | null;
   status: "draft" | "confirmed"; // ADDED for draft/confirmed workflow
   processingStatus: "pending" | "processing" | "completed" | "failed";
   errorMessage?: string | null;
@@ -80,10 +87,13 @@ const PatientInfoSchema = new Schema<IPatientInfo>(
 const TestSchema = new Schema<ITest>(
   {
     name: { type: String, required: true },
-    type: { type: String, default: null },
-  },
-  { _id: false }
-);
+    type: { type: String, default: null },status: { type: String, enum: ["pending", "completed", "cancelled"], default: "pending" },
+    completedDate: { type: Date, default: null },
+    reportUrl: { type: String, default: null },
+    resultSummary: { type: String, default: null },
+    notes: { type: String, default: null },
+  }, { _id: true }); 
+
 
 // Medicine Sub-Schema
 const MedicineSchema = new Schema<IMedicine>(
