@@ -327,6 +327,18 @@ export const prescriptionSaveService = async (
   prescriptionData: any,
   userId: string
 ) => {
+
+  if (prescriptionData.tests && Array.isArray(prescriptionData.tests)) {
+    prescriptionData.tests = prescriptionData.tests.map((test: any) => ({
+      name: test.name,
+      type: test.type || null,
+      status: "pending",           // ⭐ HERE - Always set to pending for new tests
+      completedDate: null,
+      reportUrl: null,
+      resultSummary: null,
+      notes: null,
+    }));
+  }
   // Create new prescription with user-edited data
   const prescription = new PrescriptionModel({
     ...prescriptionData,
@@ -336,6 +348,7 @@ export const prescriptionSaveService = async (
     parsedAt: new Date(),
     uploadedAt: new Date(),
     isCurrent: prescriptionData.isCurrent ?? true,
+    isComplete: false,
   });
 
   const savedPrescription = await prescription.save();
