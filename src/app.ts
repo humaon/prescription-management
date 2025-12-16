@@ -82,6 +82,8 @@ app.post("/cron/reminders/noon", async (_req, res) => {
 // Cloud Scheduler endpoints - Night reminders (8:00 PM)
 app.post("/cron/reminders/night", async (_req, res) => {
   try {
+    app.use("/uploads", express.static("uploads"));
+
     console.log("🌙 Night reminder cron triggered");
     const count = await runRemindersForTimeSlot("night");
     res.status(200).json({ 
