@@ -11,6 +11,8 @@ import {
 } from "../validation/prescription.validation";
 import { ReminderModel } from "../models/reminder.model";
 import { parseDosageSchedule } from "../lib/dosageParser";
+import { PrescriptionFeedbackModel } from "../models/PrescriptionFeedback.model";
+
 
 // Parse prescription text using Gemini API
 
@@ -790,17 +792,17 @@ export const getHealthInsightsService = async (
     recentDiagnoses,
   };
 }
-export const prescriptionGetByIdService = async (
-  prescriptionId: string,
-  userId: string
-) => {
-  const prescription = await PrescriptionModel.findOne({
-    _id: new Types.ObjectId(prescriptionId),
-    userId: new Types.ObjectId(userId),
-  }).lean();
+// export const prescriptionGetByIdService = async (
+//   prescriptionId: string,
+//   userId: string
+// ) => {
+//   const prescription = await PrescriptionModel.findOne({
+//     _id: new Types.ObjectId(prescriptionId),
+//     userId: new Types.ObjectId(userId),
+//   }).lean();
 
-  return prescription;
-};
+//   return prescription;
+// };
 
 /**
  * NEW: Get prescription details with related data (reminders, feedback, test status)
@@ -851,12 +853,483 @@ export const getPrescriptionDetailsService = async (
       active: reminders.filter((r) => r.isActive).length,
       list: reminders,
     },
-    tests: {
+    prescriptionTests: {
       ...testStats,
       allCompleted: allTestsCompleted,
       list: prescription.tests,
     },
     feedback: feedback || null,
     canComplete: allTestsCompleted && !prescription.isComplete,
+  };
+};
+
+// ============================================
+// NEW SERVICES - TEST TRACKING
+// ============================================
+
+export const getPendingTestsService = async (userId: string) => {
+  const prescriptions = await PrescriptionModel.find({
+    userId: new Types.ObjectId(userId),
+    "tests.status": "pending",
+  })
+    .select("_id doctor patient uploadedAt diagnosis tests")
+    .lean();
+
+  const pendingTests = prescriptions.flatMap((prescription) =>
+    prescription.tests
+      .filter((test: any) => test.status === "pending")
+      .map((test: any) => ({
+        prescriptionId: prescription._id,
+        testId: test._id,
+        testName: test.name,
+        testType: test.type,
+        status: test.status,
+        doctorName: prescription.doctor?.name,
+        prescribedDate: prescription.uploadedAt,
+        diagnosis: prescription.diagnosis,
+      }))
+  );
+
+  return pendingTests;
+};
+export const completeTestService = async (
+  prescriptionId: string,
+  testId: string,
+  userId: string,
+  data: {
+    reportUrl?: string;
+    resultSummary?: string;
+    notes?: string;
+  }
+) => {
+  const prescription = await PrescriptionModel.findOne({
+    _id: new Types.ObjectId(prescriptionId),
+    userId: new Types.ObjectId(userId),
+  });
+
+  if (!prescription) {
+    throw new Error("Prescription not found or access denied");
+  }
+
+  // Find test by _id in the array
+  const testIndex = prescription.tests.findIndex(
+    (t) => t._id?.toString() === testId
+  );
+
+  if (testIndex === -1) {
+    throw new Error("Test not found in this prescription");
+  }
+
+  // Update test properties
+  prescription.tests[testIndex].status = "completed";
+  prescription.tests[testIndex].completedDate = new Date();
+  prescription.tests[testIndex].reportUrl = data.reportUrl || null;
+  prescription.tests[testIndex].resultSummary = data.resultSummary || null;
+  prescription.tests[testIndex].notes = data.notes || null;
+
+  await prescription.save();
+
+  return {
+    prescriptionId: prescription._id,
+    test: prescription.tests[testIndex],
+  };
+};
+
+export const getPrescriptionTestsService = async (
+  prescriptionId: string,
+  userId: string
+) => {
+  const prescription = await PrescriptionModel.findOne({
+    _id: new Types.ObjectId(prescriptionId),
+    userId: new Types.ObjectId(userId),
+  })
+    .select("tests doctor uploadedAt")
+    .lean();
+
+  if (!prescription) {
+    throw new Error("Prescription not found or access denied");
+  }
+
+  return {
+    prescriptionId: prescription._id,
+    doctorName: prescription.doctor?.name,
+    prescribedDate: prescription.uploadedAt,
+    tests: prescription.tests,
+  };
+};
+
+export const getCompletedTestsService = async (userId: string) => {
+  const prescriptions = await PrescriptionModel.find({
+    userId: new Types.ObjectId(userId),
+    "tests.status": "completed",
+  })
+    .select("_id doctor uploadedAt tests")
+    .lean();
+
+  const completedTests = prescriptions.flatMap((prescription) =>
+    prescription.tests
+      .filter((test: any) => test.status === "completed")
+      .map((test: any) => ({
+        prescriptionId: prescription._id,
+        testId: test._id,
+        testName: test.name,
+        testType: test.type,
+        status: test.status,
+        completedDate: test.completedDate,
+        reportUrl: test.reportUrl,
+        resultSummary: test.resultSummary,
+        notes: test.notes,
+        doctorName: prescription.doctor?.name,
+        prescribedDate: prescription.uploadedAt,
+      }))
+  );
+
+  return completedTests;
+};
+
+export const cancelTestService = async (
+  prescriptionId: string,
+  testId: string,
+  userId: string,
+  reason?: string
+) => {
+  const prescription = await PrescriptionModel.findOne({
+    _id: new Types.ObjectId(prescriptionId),
+    userId: new Types.ObjectId(userId),
+  });
+
+  // if (!prescription) {
+  //   throw new Error("Prescription not found or access denied");
+  // }
+
+  // const test = prescription.tests.id(testId);
+
+  // if (!test) {
+  //   throw new Error("Test not found in this prescription");
+  // }
+
+  // test.status = "cancelled";
+  // test.notes = reason || "Cancelled by user";
+
+  // await prescription.save();
+
+  // return {
+  //   prescriptionId: prescription._id,
+  //   test: test.toObject(),
+  // };
+};
+
+export const areAllTestsCompletedService = async (
+  prescriptionId: string,
+  userId: string
+): Promise<boolean> => {
+  const prescription = await PrescriptionModel.findOne({
+    _id: new Types.ObjectId(prescriptionId),
+    userId: new Types.ObjectId(userId),
+  })
+    .select("tests")
+    .lean();
+
+  if (!prescription || prescription.tests.length === 0) {
+    return true;
+  }
+
+  return prescription.tests.every(
+    (test: any) => test.status === "completed" || test.status === "cancelled"
+  );
+};
+
+export const getTestStatsService = async (userId: string) => {
+  const prescriptions = await PrescriptionModel.find({
+    userId: new Types.ObjectId(userId),
+  })
+    .select("tests")
+    .lean();
+
+  const allTests = prescriptions.flatMap((p) => p.tests);
+
+  return {
+    total: allTests.length,
+    pending: allTests.filter((t: any) => t.status === "pending").length,
+    completed: allTests.filter((t: any) => t.status === "completed").length,
+    cancelled: allTests.filter((t: any) => t.status === "cancelled").length,
+  };
+};
+
+// ============================================
+// NEW SERVICES - PRESCRIPTION COMPLETION
+// ============================================
+
+export const completePrescriptionService = async (
+  prescriptionId: string,
+  userId: string,
+  feedbackData: {
+    overallImprovement: number;
+    symptomRelief: number;
+    medicationEffectiveness: number;
+    sideEffects: number;
+    healthConditionNow: string;
+    wasHelpful: boolean;
+    sideEffectsDescription?: string;
+    additionalComments?: string;
+    wouldRecommend: boolean;
+  }
+) => {
+  const prescription = await PrescriptionModel.findOne({
+    _id: new Types.ObjectId(prescriptionId),
+    userId: new Types.ObjectId(userId),
+  });
+
+  if (!prescription) {
+    throw new Error("Prescription not found or access denied");
+  }
+
+  if (prescription.isComplete) {
+    throw new Error("Prescription is already marked as complete");
+  }
+
+  const feedback = await PrescriptionFeedbackModel.create({
+    userId: new Types.ObjectId(userId),
+    prescriptionId: new Types.ObjectId(prescriptionId),
+    ...feedbackData,
+  });
+
+  prescription.isComplete = true;
+  prescription.completedAt = new Date();
+  prescription.isCurrent = false;
+  await prescription.save();
+
+  await ReminderModel.updateMany(
+    { prescriptionId: new Types.ObjectId(prescriptionId) },
+    { isActive: false }
+  );
+
+  console.log(`✅ Prescription ${prescriptionId} completed. Reminders paused.`);
+
+  return {
+    prescription,
+    feedback,
+  };
+};
+
+export const getPrescriptionFeedback = async (
+  prescriptionId: string,
+  userId: string
+) => {
+  return await PrescriptionFeedbackModel.findOne({
+    prescriptionId: new Types.ObjectId(prescriptionId),
+    userId: new Types.ObjectId(userId),
+  }).lean();
+};
+
+export const getClinicalSummaryService = async (userId: string) => {
+  const prescriptions = await PrescriptionModel.find({
+    userId: new Types.ObjectId(userId),
+    status: "confirmed",
+  })
+    .sort({ uploadedAt: 1 })
+    .lean();
+
+  const feedbacks = await PrescriptionFeedbackModel.find({
+    userId: new Types.ObjectId(userId),
+  }).lean();
+
+  const latestPrescription = prescriptions[prescriptions.length - 1];
+  const patientInfo = {
+    name: latestPrescription?.patient?.name || "N/A",
+    age: latestPrescription?.patient?.age || "N/A",
+    gender: latestPrescription?.patient?.gender || "N/A",
+    contact: latestPrescription?.patient?.contact || "N/A",
+  };
+
+  const completedPrescriptions = prescriptions.filter((p) => p.isComplete).length;
+  const activePrescriptions = prescriptions.filter(
+    (p) => p.isCurrent && !p.isComplete
+  ).length;
+
+  const allMedicines = new Set<string>();
+  prescriptions.forEach((p) => {
+    p.medicines.forEach((m) => allMedicines.add(m.name));
+  });
+
+  const allTests = new Set<string>();
+  prescriptions.forEach((p) => {
+    p.tests.forEach((t) => allTests.add(t.name));
+  });
+
+  const startDate = prescriptions[0]?.uploadedAt || new Date();
+  const endDate = prescriptions[prescriptions.length - 1]?.completedAt || null;
+  const durationDays = endDate
+    ? Math.floor((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24))
+    : Math.floor((new Date().getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+
+  const treatmentOverview = {
+    totalPrescriptions: prescriptions.length,
+    completedPrescriptions,
+    activePrescriptions,
+    totalMedicines: allMedicines.size,
+    totalTests: allTests.size,
+    treatmentDuration: {
+      startDate,
+      endDate,
+      durationDays,
+    },
+  };
+
+  const healthProgression = prescriptions.map((prescription) => {
+    const feedback = feedbacks.find(
+      (f) => f.prescriptionId.toString() === prescription._id.toString()
+    );
+
+    return {
+      date: prescription.uploadedAt,
+      doctor: prescription.doctor?.name || "Unknown",
+      diagnosis: prescription.diagnosis,
+      symptoms: prescription.symptoms,
+      medicines: prescription.medicines.map((m) => m.name),
+      tests: prescription.tests.map((t) => t.name),
+      feedback: feedback
+        ? {
+            improvement: feedback.overallImprovement,
+            symptomRelief: feedback.symptomRelief,
+            condition: feedback.healthConditionNow,
+          }
+        : undefined,
+    };
+  });
+
+  const medicineUsage = new Map<string, { count: number; effectiveness: number[]; durations: string[] }>();
+  prescriptions.forEach((prescription) => {
+    const feedback = feedbacks.find(
+      (f) => f.prescriptionId.toString() === prescription._id.toString()
+    );
+
+    prescription.medicines.forEach((medicine) => {
+      const existing = medicineUsage.get(medicine.name);
+      if (existing) {
+        existing.count++;
+        if (feedback) {
+          existing.effectiveness.push(feedback.medicationEffectiveness);
+        }
+        if (medicine.duration) {
+          existing.durations.push(medicine.duration);
+        }
+      } else {
+        medicineUsage.set(medicine.name, {
+          count: 1,
+          effectiveness: feedback ? [feedback.medicationEffectiveness] : [],
+          durations: medicine.duration ? [medicine.duration] : [],
+        });
+      }
+    });
+  });
+
+  const medicationHistory = Array.from(medicineUsage.entries()).map(
+    ([name, data]) => ({
+      name,
+      timesPrescribed: data.count,
+      totalDuration: data.durations.join(", ") || "N/A",
+      effectiveness:
+        data.effectiveness.length > 0
+          ? Math.round(
+              data.effectiveness.reduce((a, b) => a + b, 0) /
+                data.effectiveness.length
+            )
+          : undefined,
+    })
+  );
+
+  const testHistory = prescriptions.flatMap((p) =>
+    p.tests.map((test: any) => ({
+      testName: test.name,
+      testType: test.type || "N/A",
+      prescribedDate: p.uploadedAt,
+      doctorName: p.doctor?.name || "Unknown",
+      status: test.status,
+      completedDate: test.completedDate,
+      resultSummary: test.resultSummary,
+    }))
+  );
+
+  const latestDiagnosis = latestPrescription?.diagnosis || [];
+  const latestSymptoms = latestPrescription?.symptoms || [];
+  const activeMedicationsCount = prescriptions
+    .filter((p) => p.isCurrent && !p.isComplete)
+    .reduce((sum, p) => sum + p.medicines.length, 0);
+
+  const avgImprovement =
+    feedbacks.length > 0
+      ? feedbacks.reduce((sum, f) => sum + f.overallImprovement, 0) /
+        feedbacks.length
+      : undefined;
+
+  let overallProgress = "No data available";
+  if (avgImprovement) {
+    if (avgImprovement >= 4) overallProgress = "Excellent improvement";
+    else if (avgImprovement >= 3) overallProgress = "Good improvement";
+    else if (avgImprovement >= 2) overallProgress = "Moderate improvement";
+    else overallProgress = "Limited improvement";
+  }
+
+  const currentHealthStatus = {
+    latestDiagnosis,
+    latestSymptoms,
+    activeMedications: activeMedicationsCount,
+    overallProgress,
+    averageImprovement: avgImprovement,
+  };
+
+  const feedbackSummary = {
+    totalFeedbacks: feedbacks.length,
+    averageImprovement:
+      feedbacks.length > 0
+        ? Math.round(
+            (feedbacks.reduce((sum, f) => sum + f.overallImprovement, 0) /
+              feedbacks.length) *
+              10
+          ) / 10
+        : 0,
+    averageSymptomRelief:
+      feedbacks.length > 0
+        ? Math.round(
+            (feedbacks.reduce((sum, f) => sum + f.symptomRelief, 0) /
+              feedbacks.length) *
+              10
+          ) / 10
+        : 0,
+    averageMedicationEffectiveness:
+      feedbacks.length > 0
+        ? Math.round(
+            (feedbacks.reduce((sum, f) => sum + f.medicationEffectiveness, 0) /
+              feedbacks.length) *
+              10
+          ) / 10
+        : 0,
+    averageSideEffects:
+      feedbacks.length > 0
+        ? Math.round(
+            (feedbacks.reduce((sum, f) => sum + f.sideEffects, 0) /
+              feedbacks.length) *
+              10
+          ) / 10
+        : 0,
+    recommendationRate:
+      feedbacks.length > 0
+        ? Math.round(
+            (feedbacks.filter((f) => f.wouldRecommend).length /
+              feedbacks.length) *
+              100
+          )
+        : 0,
+  };
+
+  return {
+    patientInfo,
+    treatmentOverview,
+    healthProgression,
+    medicationHistory,
+    testHistory,
+    currentHealthStatus,
+    feedbackSummary,
   };
 };

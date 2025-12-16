@@ -16,13 +16,14 @@ export interface IPatientInfo {
 }
 
 export interface ITest {
+  _id?: any;  // Mongoose adds this automatically
   name: string;
   type?: string | null;
-  status: "pending",              // NEW: pending | completed | cancelled
-  completedDate: null,             // NEW: When test was done
-  reportUrl: null,                 // NEW: S3 URL for report
-  resultSummary: null,             // NEW: "Blood sugar: 95 mg/dL"
-  notes: null         
+  status: "pending" | "completed" | "cancelled";  // Union type, not just "pending"
+  completedDate?: Date | null;     // Can be Date or null
+  reportUrl?: string | null;       // Can be string or null
+  resultSummary?: string | null;   // Can be string or null
+  notes?: string | null;           // Can be string or null
 }
 
 export interface IMedicine {
