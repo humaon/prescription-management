@@ -147,6 +147,16 @@ const PrescriptionSchema = new Schema<IPrescriptionDocument>(
       default: true,
       index: true,
     },
+    isComplete: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    completedAt: {
+      type: Date,
+      default: null,
+    },
 
     // Draft/Confirmed Status - ADDED
     status: {
