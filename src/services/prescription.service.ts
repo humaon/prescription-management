@@ -12,6 +12,7 @@ import {
 import { ReminderModel } from "../models/reminder.model";
 import { parseDosageSchedule } from "../lib/dosageParser";
 import { PrescriptionFeedbackModel } from "../models/PrescriptionFeedback.model";
+import PDFDocument from 'pdfkit';
 
 
 // Parse prescription text using Gemini API
@@ -1345,4 +1346,789 @@ export const getClinicalSummaryService = async (userId: string) => {
     currentHealthStatus,
     feedbackSummary,
   };
+};
+export interface ClinicalTimelinePeriod {
+  periodLabel: string; // "Month 1", "Months 2-3", "Months 4-6", "Current"
+  startDate: Date;
+  endDate: Date;
+  monthsFromStart: number;
+  
+  // What happened during this period
+  prescriptions: Array<{
+    id: string;
+    date: Date;
+    doctor: {
+      name: string;
+      specialization?: string;
+    };
+  }>;
+  
+  // Patient's condition
+  symptoms: {
+    reported: string[]; // All symptoms in this period
+    new: string[]; // New symptoms not seen before
+    continuing: string[]; // Symptoms from previous periods
+    resolved: string[]; // Symptoms that were present before but not now
+  };
+  
+  diagnosis: string[];
+  
+  // Medications prescribed
+  medications: Array<{
+    name: string;
+    dosage: string;
+    frequency: string;
+    duration: string;
+    instructions?: string;
+  }>;
+  
+  // Tests during this period
+  tests: {
+    ordered: Array<{
+      name: string;
+      type?: string;
+      orderedDate: Date;
+    }>;
+    completed: Array<{
+      name: string;
+      type?: string;
+      completedDate: Date;
+      resultSummary?: string;
+      notes?: string;
+    }>;
+  };
+  
+  // Patient feedback (if prescription was completed)
+  patientFeedback?: {
+    overallImprovement: number; // 1-5
+    symptomRelief: number; // 1-5
+    medicationEffectiveness: number; // 1-5
+    sideEffects: number; // 1-5 (1=severe, 5=none)
+    sideEffectsDescription?: string;
+    healthConditionNow: string;
+    wasHelpful: boolean;
+    wouldRecommend: boolean;
+    additionalComments?: string;
+  };
+  
+  clinicalNotes: string[]; // Auto-generated clinical observations
+}
+
+export interface TestResultsByType {
+  testType: string;
+  testName: string;
+  results: Array<{
+    date: Date;
+    periodLabel: string;
+    status: string;
+    resultSummary?: string;
+    notes?: string;
+  }>;
+}
+
+export interface DetailedClinicalSummary {
+  generatedAt: Date;
+  
+  // Patient demographics
+  patientInfo: {
+    name: string;
+    age: string;
+    gender: string;
+    contact: string;
+  };
+  
+  // Treatment overview
+  treatmentPeriod: {
+    firstVisit: Date;
+    lastVisit: Date;
+    totalMonths: number;
+    totalPrescriptions: number;
+    totalDoctorsConsulted: number;
+    activeTreatments: number;
+    completedTreatments: number;
+  };
+  
+  // Timeline of care (chronological)
+  clinicalTimeline: ClinicalTimelinePeriod[];
+  
+  // Test results grouped by type
+  testResultsSummary: TestResultsByType[];
+  
+  // Overall health progression
+  healthProgressionSummary: {
+    initialSymptoms: string[];
+    currentSymptoms: string[];
+    resolvedSymptoms: string[];
+    persistentSymptoms: string[];
+    
+    baselineCondition: string; // First feedback description
+    currentCondition: string; // Latest feedback description
+    
+    improvementTrend: {
+      overallScore: number; // Average improvement rating
+      trend: "improving" | "stable" | "declining" | "insufficient_data";
+      progressionData: Array<{
+        period: string;
+        improvement: number;
+        symptomRelief: number;
+      }>;
+    };
+    
+    sideEffectsHistory: {
+      totalReported: number;
+      averageSeverity: number; // 1-5
+      descriptions: Array<{
+        period: string;
+        severity: number;
+        description: string;
+      }>;
+    };
+  };
+  
+  // Medication effectiveness
+  medicationAnalysis: Array<{
+    name: string;
+    timesPrescribed: number;
+    periods: string[];
+    totalDuration: string;
+    effectiveness?: number; // Average from feedback
+    associatedSymptoms: string[];
+  }>;
+  
+  // Clinical recommendations (auto-generated)
+  clinicalObservations: string[];
+}
+
+// Helper: Calculate months difference
+const getMonthsDifference = (start: Date, end: Date): number => {
+  const months = (end.getFullYear() - start.getFullYear()) * 12 + 
+                 (end.getMonth() - start.getMonth());
+  return months;
+};
+
+// Helper: Group prescriptions into time periods
+const groupPrescriptionsByPeriods = (prescriptions: any[], startDate: Date) => {
+  const periods: Map<string, any[]> = new Map();
+  
+  prescriptions.forEach(prescription => {
+    const prescDate = new Date(prescription.uploadedAt);
+    const monthsDiff = getMonthsDifference(startDate, prescDate);
+    
+    let periodKey: string;
+    if (monthsDiff === 0) periodKey = "Month 1";
+    else if (monthsDiff === 1) periodKey = "Month 2";
+    else if (monthsDiff >= 2 && monthsDiff <= 3) periodKey = "Months 2-3";
+    else if (monthsDiff >= 4 && monthsDiff <= 6) periodKey = "Months 4-6";
+    else if (monthsDiff >= 7 && monthsDiff <= 12) periodKey = "Months 7-12";
+    else periodKey = `Month ${monthsDiff + 1}`;
+    
+    if (!periods.has(periodKey)) {
+      periods.set(periodKey, []);
+    }
+    periods.get(periodKey)!.push(prescription);
+  });
+  
+  return periods;
+};
+
+export const getDetailedClinicalSummaryService = async (
+  userId: string
+): Promise<DetailedClinicalSummary> => {
+  // Fetch all prescriptions and feedbacks
+  const prescriptions = await PrescriptionModel.find({
+    userId: new Types.ObjectId(userId),
+    status: "confirmed",
+  })
+    .sort({ uploadedAt: 1 })
+    .lean();
+
+  if (prescriptions.length === 0) {
+    throw new Error("No prescriptions found for this user");
+  }
+
+  const feedbacks = await PrescriptionFeedbackModel.find({
+    userId: new Types.ObjectId(userId),
+  }).lean();
+
+  // Create feedback map for quick lookup
+  const feedbackMap = new Map(
+    feedbacks.map(f => [f.prescriptionId.toString(), f])
+  );
+
+  // === PATIENT INFO ===
+  const latestPrescription = prescriptions[prescriptions.length - 1];
+  const patientInfo = {
+    name: latestPrescription.patient?.name || "N/A",
+    age: latestPrescription.patient?.age || "N/A",
+    gender: latestPrescription.patient?.gender || "N/A",
+    contact: latestPrescription.patient?.contact || "N/A",
+  };
+
+  // === TREATMENT PERIOD ===
+  const firstVisit = new Date(prescriptions[0].uploadedAt);
+  const lastVisit = new Date(prescriptions[prescriptions.length - 1].uploadedAt);
+  const totalMonths = getMonthsDifference(firstVisit, lastVisit);
+  
+  const uniqueDoctors = new Set(
+    prescriptions.map(p => p.doctor?.name).filter(Boolean)
+  );
+
+  const treatmentPeriod = {
+    firstVisit,
+    lastVisit,
+    totalMonths,
+    totalPrescriptions: prescriptions.length,
+    totalDoctorsConsulted: uniqueDoctors.size,
+    activeTreatments: prescriptions.filter(p => p.isCurrent && !p.isComplete).length,
+    completedTreatments: prescriptions.filter(p => p.isComplete).length,
+  };
+
+  // === BUILD CLINICAL TIMELINE ===
+  const periodGroups = groupPrescriptionsByPeriods(prescriptions, firstVisit);
+  const clinicalTimeline: ClinicalTimelinePeriod[] = [];
+  
+  const allSymptomsSoFar = new Set<string>();
+  
+  for (const [periodLabel, periodPrescriptions] of periodGroups) {
+    const periodStart = new Date(periodPrescriptions[0].uploadedAt);
+    const periodEnd = new Date(periodPrescriptions[periodPrescriptions.length - 1].uploadedAt);
+    const monthsFromStart = getMonthsDifference(firstVisit, periodStart);
+    
+    // Collect all symptoms in this period
+    const periodSymptoms = new Set<string>();
+    periodPrescriptions.forEach(p => {
+      p.symptoms.forEach((s: string) => periodSymptoms.add(s));
+    });
+    
+    // Determine new vs continuing symptoms
+    const newSymptoms = Array.from(periodSymptoms).filter(s => !allSymptomsSoFar.has(s));
+    const continuingSymptoms = Array.from(periodSymptoms).filter(s => allSymptomsSoFar.has(s));
+    
+    // Add to all symptoms seen
+    periodSymptoms.forEach(s => allSymptomsSoFar.add(s));
+    
+    // Collect diagnosis
+    const diagnosisSet = new Set<string>();
+    periodPrescriptions.forEach(p => {
+      p.diagnosis.forEach((d: string) => diagnosisSet.add(d));
+    });
+    
+    // Collect medications
+    const medications: any[] = [];
+    periodPrescriptions.forEach(p => {
+      p.medicines.forEach((m: any) => {
+        medications.push({
+          name: m.name,
+          dosage: m.dosage || "N/A",
+          frequency: m.frequency || "N/A",
+          duration: m.duration || "N/A",
+          instructions: m.instructions,
+        });
+      });
+    });
+    
+    // Collect tests
+    const orderedTests: any[] = [];
+    const completedTests: any[] = [];
+    
+    periodPrescriptions.forEach(p => {
+      p.tests.forEach((test: any) => {
+        orderedTests.push({
+          name: test.name,
+          type: test.type,
+          orderedDate: p.uploadedAt,
+        });
+        
+        if (test.status === "completed") {
+          completedTests.push({
+            name: test.name,
+            type: test.type,
+            completedDate: test.completedDate,
+            resultSummary: test.resultSummary,
+            notes: test.notes,
+          });
+        }
+      });
+    });
+    
+    // Get feedback (use most recent completed prescription in period)
+    let patientFeedback: any = undefined;
+    for (const p of periodPrescriptions.reverse()) {
+      const feedback = feedbackMap.get(p._id.toString());
+      if (feedback) {
+        patientFeedback = {
+          overallImprovement: feedback.overallImprovement,
+          symptomRelief: feedback.symptomRelief,
+          medicationEffectiveness: feedback.medicationEffectiveness,
+          sideEffects: feedback.sideEffects,
+          sideEffectsDescription: feedback.sideEffectsDescription,
+          healthConditionNow: feedback.healthConditionNow,
+          wasHelpful: feedback.wasHelpful,
+          wouldRecommend: feedback.wouldRecommend,
+          additionalComments: feedback.additionalComments,
+        };
+        break;
+      }
+    }
+    periodPrescriptions.reverse(); // Restore order
+    
+    // Generate clinical notes
+    const clinicalNotes: string[] = [];
+    
+    if (newSymptoms.length > 0) {
+      clinicalNotes.push(`New symptoms reported: ${newSymptoms.join(", ")}`);
+    }
+    if (continuingSymptoms.length > 0) {
+      clinicalNotes.push(`Continuing symptoms: ${continuingSymptoms.join(", ")}`);
+    }
+    if (medications.length > 0) {
+      clinicalNotes.push(`Prescribed ${medications.length} medication(s)`);
+    }
+    if (completedTests.length > 0) {
+      clinicalNotes.push(`${completedTests.length} test(s) completed`);
+    }
+    if (patientFeedback) {
+      clinicalNotes.push(`Patient improvement rating: ${patientFeedback.overallImprovement}/5`);
+      if (patientFeedback.sideEffects < 4) {
+        clinicalNotes.push(`Side effects reported (severity: ${6 - patientFeedback.sideEffects}/5)`);
+      }
+    }
+    
+    clinicalTimeline.push({
+      periodLabel,
+      startDate: periodStart,
+      endDate: periodEnd,
+      monthsFromStart,
+      prescriptions: periodPrescriptions.map(p => ({
+        id: p._id.toString(),
+        date: p.uploadedAt,
+        doctor: {
+          name: p.doctor?.name || "Unknown",
+          specialization: p.doctor?.specialization,
+        },
+      })),
+      symptoms: {
+        reported: Array.from(periodSymptoms),
+        new: newSymptoms,
+        continuing: continuingSymptoms,
+        resolved: [], // Will calculate in next iteration
+      },
+      diagnosis: Array.from(diagnosisSet),
+      medications,
+      tests: {
+        ordered: orderedTests,
+        completed: completedTests,
+      },
+      patientFeedback,
+      clinicalNotes,
+    });
+  }
+  
+  // Calculate resolved symptoms for each period
+  for (let i = 0; i < clinicalTimeline.length - 1; i++) {
+    const currentPeriod = clinicalTimeline[i];
+    const nextPeriod = clinicalTimeline[i + 1];
+    
+    const currentSymptoms = new Set(currentPeriod.symptoms.reported);
+    const nextSymptoms = new Set(nextPeriod.symptoms.reported);
+    
+    const resolved = Array.from(currentSymptoms).filter(s => !nextSymptoms.has(s));
+    nextPeriod.symptoms.resolved = resolved;
+  }
+  
+  // === TEST RESULTS GROUPED BY TYPE ===
+  const testsByType = new Map<string, any[]>();
+  
+  clinicalTimeline.forEach(period => {
+    period.tests.completed.forEach(test => {
+      const key = test.type || test.name;
+      if (!testsByType.has(key)) {
+        testsByType.set(key, []);
+      }
+      testsByType.get(key)!.push({
+        date: test.completedDate,
+        periodLabel: period.periodLabel,
+        status: "completed",
+        resultSummary: test.resultSummary,
+        notes: test.notes,
+      });
+    });
+  });
+  
+  const testResultsSummary: TestResultsByType[] = Array.from(testsByType.entries()).map(
+    ([testType, results]) => ({
+      testType,
+      testName: results[0]?.notes || testType,
+      results: results.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()),
+    })
+  );
+  
+  // === HEALTH PROGRESSION SUMMARY ===
+  const initialSymptoms = clinicalTimeline[0]?.symptoms.reported || [];
+  const currentSymptoms = clinicalTimeline[clinicalTimeline.length - 1]?.symptoms.reported || [];
+  
+  const allSymptomsEver = new Set<string>();
+  clinicalTimeline.forEach(p => p.symptoms.reported.forEach(s => allSymptomsEver.add(s)));
+  
+  const resolvedSymptoms = Array.from(allSymptomsEver).filter(s => !currentSymptoms.includes(s));
+  const persistentSymptoms = initialSymptoms.filter(s => currentSymptoms.includes(s));
+  
+  const baselineCondition = feedbacks[0]?.healthConditionNow || "No baseline data";
+  const currentCondition = feedbacks[feedbacks.length - 1]?.healthConditionNow || "No current data";
+  
+  // Calculate improvement trend
+  const progressionData = clinicalTimeline
+    .filter(p => p.patientFeedback)
+    .map(p => ({
+      period: p.periodLabel,
+      improvement: p.patientFeedback!.overallImprovement,
+      symptomRelief: p.patientFeedback!.symptomRelief,
+    }));
+  
+  const avgImprovement = progressionData.length > 0
+    ? progressionData.reduce((sum, p) => sum + p.improvement, 0) / progressionData.length
+    : 0;
+  
+  let trend: "improving" | "stable" | "declining" | "insufficient_data" = "insufficient_data";
+  if (progressionData.length >= 2) {
+    const first = progressionData[0].improvement;
+    const last = progressionData[progressionData.length - 1].improvement;
+    if (last > first + 0.5) trend = "improving";
+    else if (last < first - 0.5) trend = "declining";
+    else trend = "stable";
+  }
+  
+  // Side effects history
+  const sideEffectsDescriptions = clinicalTimeline
+    .filter(p => p.patientFeedback && p.patientFeedback.sideEffectsDescription)
+    .map(p => ({
+      period: p.periodLabel,
+      severity: 6 - p.patientFeedback!.sideEffects, // Invert scale (1=none, 5=severe)
+      description: p.patientFeedback!.sideEffectsDescription || "",
+    }));
+  
+  const avgSeverity = sideEffectsDescriptions.length > 0
+    ? sideEffectsDescriptions.reduce((sum, s) => sum + s.severity, 0) / sideEffectsDescriptions.length
+    : 0;
+  
+  const healthProgressionSummary = {
+    initialSymptoms,
+    currentSymptoms,
+    resolvedSymptoms,
+    persistentSymptoms,
+    baselineCondition,
+    currentCondition,
+    improvementTrend: {
+      overallScore: Math.round(avgImprovement * 10) / 10,
+      trend,
+      progressionData,
+    },
+    sideEffectsHistory: {
+      totalReported: sideEffectsDescriptions.length,
+      averageSeverity: Math.round(avgSeverity * 10) / 10,
+      descriptions: sideEffectsDescriptions,
+    },
+  };
+  
+  // === MEDICATION ANALYSIS ===
+  const medicineUsage = new Map<string, any>();
+  
+  clinicalTimeline.forEach(period => {
+    period.medications.forEach(med => {
+      if (!medicineUsage.has(med.name)) {
+        medicineUsage.set(med.name, {
+          name: med.name,
+          timesPrescribed: 0,
+          periods: [],
+          durations: [],
+          effectiveness: [],
+          associatedSymptoms: new Set<string>(),
+        });
+      }
+      
+      const usage = medicineUsage.get(med.name);
+      usage.timesPrescribed++;
+      usage.periods.push(period.periodLabel);
+      if (med.duration) usage.durations.push(med.duration);
+      if (period.patientFeedback) {
+        usage.effectiveness.push(period.patientFeedback.medicationEffectiveness);
+      }
+      period.symptoms.reported.forEach(s => usage.associatedSymptoms.add(s));
+    });
+  });
+  
+  const medicationAnalysis = Array.from(medicineUsage.values()).map(m => ({
+    name: m.name,
+    timesPrescribed: m.timesPrescribed,
+    periods: m.periods,
+    totalDuration: m.durations.join(", ") || "N/A",
+    effectiveness: m.effectiveness.length > 0
+      ? Math.round((m.effectiveness.reduce((a: number, b: number) => a + b, 0) / m.effectiveness.length) * 10) / 10
+      : undefined,
+     associatedSymptoms: Array.from(m.associatedSymptoms) as string[],
+  }));
+  
+  // === CLINICAL OBSERVATIONS ===
+  const clinicalObservations: string[] = [];
+  
+  if (trend === "improving") {
+    clinicalObservations.push("Patient shows positive response to treatment with overall improvement in condition.");
+  } else if (trend === "declining") {
+    clinicalObservations.push("Patient condition shows declining trend. Consider treatment reassessment.");
+  }
+  
+  if (resolvedSymptoms.length > 0) {
+    clinicalObservations.push(`${resolvedSymptoms.length} symptom(s) have resolved: ${resolvedSymptoms.slice(0, 3).join(", ")}`);
+  }
+  
+  if (persistentSymptoms.length > 0) {
+    clinicalObservations.push(`${persistentSymptoms.length} persistent symptom(s) require continued monitoring: ${persistentSymptoms.slice(0, 3).join(", ")}`);
+  }
+  
+  if (avgSeverity > 2) {
+    clinicalObservations.push(`Significant side effects reported. Average severity: ${avgSeverity}/5`);
+  }
+  
+  const highEffectiveness = medicationAnalysis.filter(m => m.effectiveness && m.effectiveness >= 4);
+  if (highEffectiveness.length > 0) {
+    clinicalObservations.push(`Highly effective medications: ${highEffectiveness.map(m => m.name).slice(0, 3).join(", ")}`);
+  }
+  
+  return {
+    generatedAt: new Date(),
+    patientInfo,
+    treatmentPeriod,
+    clinicalTimeline,
+    testResultsSummary,
+    healthProgressionSummary,
+    medicationAnalysis,
+    clinicalObservations,
+  };
+};
+export const generateClinicalSummaryPDFService = async (
+  userId: string
+): Promise<Buffer> => {
+  // Get the AI narrative
+  const narrative = await generateAIClinicalNarrativeService(userId);
+  
+  // Get basic patient info
+  const summary = await getDetailedClinicalSummaryService(userId);
+
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({
+        size: 'A4',
+        margins: { top: 50, bottom: 50, left: 50, right: 50 },
+      });
+
+      const buffers: Buffer[] = [];
+
+      doc.on('data', buffers.push.bind(buffers));
+      doc.on('end', () => {
+        const pdfBuffer = Buffer.concat(buffers);
+        resolve(pdfBuffer);
+      });
+
+      // Header
+      doc
+        .fontSize(22)
+        .font('Helvetica-Bold')
+        .text('Clinical Summary Report', { align: 'center' })
+        .moveDown(0.5);
+
+      doc
+        .fontSize(10)
+        .font('Helvetica')
+        .text(`Generated: ${new Date().toLocaleString()}`, { align: 'center' })
+        .moveDown(0.5);
+
+      // Horizontal line
+      doc
+        .moveTo(50, doc.y)
+        .lineTo(545, doc.y)
+        .stroke()
+        .moveDown(1);
+
+      // Patient Info
+      doc.fontSize(12).font('Helvetica-Bold').text('Patient Information').moveDown(0.3);
+      doc.fontSize(10).font('Helvetica');
+      doc.text(`Name: ${summary.patientInfo.name}`);
+      doc.text(`Age: ${summary.patientInfo.age} years`);
+      doc.text(`Gender: ${summary.patientInfo.gender === 'M' ? 'Male' : 'Female'}`);
+      doc.text(`Contact: ${summary.patientInfo.contact}`);
+      doc.moveDown(1);
+
+      // Horizontal line
+      doc
+        .moveTo(50, doc.y)
+        .lineTo(545, doc.y)
+        .stroke()
+        .moveDown(1);
+
+      // AI-Generated Clinical Narrative
+      doc
+        .fontSize(14)
+        .font('Helvetica-Bold')
+        .text('Clinical Narrative', { underline: true })
+        .moveDown(0.5);
+
+      doc
+        .fontSize(11)
+        .font('Helvetica')
+        .text(narrative, {
+          align: 'justify',
+          lineGap: 5,
+        });
+
+      doc.moveDown(2);
+
+      // Footer
+      doc
+        .fontSize(8)
+        .font('Helvetica-Oblique')
+        .fillColor('gray')
+        .text(
+          'This is a computer-generated clinical summary. For medical decisions, please consult with your healthcare provider.',
+          {
+            align: 'center',
+          }
+        );
+
+      doc.end();
+    } catch (error) {
+      reject(error);
+    }
+  });
+};
+export const generateAIClinicalNarrativeService = async (
+  userId: string
+): Promise<string> => {
+  // Get the detailed summary data
+  const summaryData = await getDetailedClinicalSummaryService(userId);
+
+  // Create a prompt for Gemini to generate narrative clinical notes
+  const prompt = `
+You are a medical professional writing detailed clinical notes. Based on the following patient data, write a comprehensive clinical summary in a professional medical narrative format.
+
+**Patient Information:**
+- Name: ${summaryData.patientInfo.name}
+- Age: ${summaryData.patientInfo.age}
+- Gender: ${summaryData.patientInfo.gender}
+
+**Treatment Period:**
+- First Visit: ${new Date(summaryData.treatmentPeriod.firstVisit).toLocaleDateString()}
+- Last Visit: ${new Date(summaryData.treatmentPeriod.lastVisit).toLocaleDateString()}
+- Duration: ${summaryData.treatmentPeriod.totalMonths} months
+- Total Prescriptions: ${summaryData.treatmentPeriod.totalPrescriptions}
+- Doctors Consulted: ${summaryData.treatmentPeriod.totalDoctorsConsulted}
+
+**Clinical Timeline:**
+${summaryData.clinicalTimeline.map((period) => `
+${period.periodLabel} (${new Date(period.startDate).toLocaleDateString()}):
+- Doctor(s): ${period.prescriptions.map(p => `${p.doctor.name} (${p.doctor.specialization})`).join(', ')}
+- Symptoms Reported: ${period.symptoms.reported.join(', ')}
+${period.symptoms.new.length > 0 ? `- New Symptoms: ${period.symptoms.new.join(', ')}` : ''}
+${period.symptoms.resolved.length > 0 ? `- Resolved Symptoms: ${period.symptoms.resolved.join(', ')}` : ''}
+- Diagnosis: ${period.diagnosis.join(', ')}
+- Medications Prescribed (${period.medications.length}): ${period.medications.slice(0, 5).map(m => `${m.name} ${m.dosage}`).join(', ')}
+${period.tests.completed.length > 0 ? `- Tests Completed: ${period.tests.completed.map(t => `${t.name}${t.resultSummary ? ' - ' + t.resultSummary : ''}`).join(', ')}` : ''}
+${period.patientFeedback ? `
+- Patient Feedback:
+  * Overall Improvement: ${period.patientFeedback.overallImprovement}/5
+  * Symptom Relief: ${period.patientFeedback.symptomRelief}/5
+  * Medication Effectiveness: ${period.patientFeedback.medicationEffectiveness}/5
+  * Side Effects: ${period.patientFeedback.sideEffects}/5
+  * Current Condition: ${period.patientFeedback.healthConditionNow}
+` : ''}
+`).join('\n')}
+
+**Health Progression:**
+- Initial Symptoms: ${summaryData.healthProgressionSummary.initialSymptoms.join(', ')}
+- Current Symptoms: ${summaryData.healthProgressionSummary.currentSymptoms.join(', ')}
+- Resolved Symptoms: ${summaryData.healthProgressionSummary.resolvedSymptoms.join(', ') || 'None'}
+- Persistent Symptoms: ${summaryData.healthProgressionSummary.persistentSymptoms.join(', ')}
+- Baseline Condition: ${summaryData.healthProgressionSummary.baselineCondition}
+- Current Condition: ${summaryData.healthProgressionSummary.currentCondition}
+- Overall Improvement Trend: ${summaryData.healthProgressionSummary.improvementTrend.trend}
+- Average Improvement Score: ${summaryData.healthProgressionSummary.improvementTrend.overallScore}/5
+
+**Test Results:**
+${summaryData.testResultsSummary.map(test => `
+- ${test.testType}:
+${test.results.map(r => `  * ${new Date(r.date).toLocaleDateString()}: ${r.resultSummary || r.status}`).join('\n')}
+`).join('\n')}
+
+**Medication Analysis:**
+Top Medications:
+${summaryData.medicationAnalysis.slice(0, 10).map(med => `
+- ${med.name}: Prescribed ${med.timesPrescribed} time(s)${med.effectiveness ? `, Effectiveness: ${med.effectiveness}/5` : ''}
+`).join('')}
+
+**Clinical Observations:**
+${summaryData.clinicalObservations.map((obs, i) => `${i + 1}. ${obs}`).join('\n')}
+
+---
+
+Please write a detailed, professional clinical narrative summary (500-800 words) that:
+1. Provides a chronological overview of the patient's treatment journey
+2. Highlights key symptoms, diagnoses, and treatment approaches
+3. Discusses medication effectiveness and any side effects
+4. Analyzes test results and their clinical significance
+5. Evaluates overall health progression and patient response to treatment
+6. Provides clinical insights and potential recommendations for ongoing care
+
+Write in a professional medical tone suitable for clinical documentation. Use proper medical terminology and maintain HIPAA-compliant language.
+`;
+
+  // Call Gemini API
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${appConfig.GEMINI_API_KEY}`;
+
+  const payload = {
+    contents: [
+      {
+        parts: [
+          {
+            text: prompt,
+          },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.7,
+      topP: 0.95,
+      topK: 40,
+      maxOutputTokens: 2048,
+    },
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Gemini API error: ${response.status} - ${error}`);
+    }
+
+    const data: any = await response.json();
+
+    if (!data.candidates || !data.candidates[0]) {
+      throw new Error("Invalid response from Gemini API");
+    }
+
+    const narrativeText = data.candidates[0].content.parts[0].text;
+
+    return narrativeText;
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`Clinical narrative generation failed: ${error.message}`);
+    }
+    throw new Error("Clinical narrative generation failed: Unknown error");
+  }
 };

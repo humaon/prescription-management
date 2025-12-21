@@ -26,7 +26,10 @@ import {
    cancelTestService,
    completePrescriptionService,
    getPrescriptionFeedback,
-   getTestStatsService
+   getTestStatsService,
+   getDetailedClinicalSummaryService,
+   generateClinicalSummaryPDFService,
+   generateAIClinicalNarrativeService
 } from "../services/prescription.service";
 
 // Step 1: Upload and parse (returns data for user to review/edit)
@@ -662,7 +665,6 @@ export const getPrescriptionFeedbackController = async (
     .json(createSuccessResponse(feedback, "Prescription feedback retrieved"));
 };
 
-// Get clinical summary report
 export const getClinicalSummaryController = async (
   req: Request,
   res: Response
@@ -671,12 +673,19 @@ export const getClinicalSummaryController = async (
     throw createServiceError("User not authenticated", 401);
   }
 
-  const summary = await getClinicalSummaryService(req.userId);
+  const summary = await getDetailedClinicalSummaryService(req.userId);
+   const narrative = await generateAIClinicalNarrativeService(req.userId);
 
   res
     .status(200)
     .json(
-      createSuccessResponse(summary, "Clinical summary report generated")
+      createSuccessResponse(
+        {
+          ...summary,
+          aiNarrative: narrative, // Add AI narrative to response
+        },
+        "Clinical summary generated successfully"
+      )
     );
 };
 
@@ -689,18 +698,19 @@ export const downloadClinicalSummaryPDFController = async (
     throw createServiceError("User not authenticated", 401);
   }
 
-  const summary = await getClinicalSummaryService(req.userId);
-
-  res
-    .status(200)
-    .json(
-      createSuccessResponse(
-        {
-          summary,
-          message:
-            "PDF generation coming soon. Use this data to generate PDF on frontend.",
-        },
-        "Clinical summary data retrieved for PDF generation"
-      )
+  try {
+    const pdfBuffer = await generateClinicalSummaryPDFService(req.userId);
+    
+    // Set headers for PDF download
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=clinical-summary-${Date.now()}.pdf`
     );
+    res.setHeader('Content-Length', pdfBuffer.length);
+
+    res.send(pdfBuffer);
+  } catch (error) {
+    throw error;
+  }
 };
