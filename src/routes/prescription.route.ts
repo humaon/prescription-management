@@ -10,7 +10,7 @@ import {
   getActiveMedicationsController,
   getUserRemindersController,
   prescriptionGetByIdController,
-  prescriptionGetDetailsController, // NEW
+  prescriptionGetDetailsController,
   prescriptionDeleteByIdController,
   togglePrescriptionStatusController,
   getPrescriptionStatsController,
@@ -24,15 +24,10 @@ import {
   getTestStatsController,
   completePrescriptionController,
   getPrescriptionFeedbackController,
-  getClinicalSummaryController,
+
   downloadClinicalSummaryPDFController,
-  
-  
+  getClinicalSummaryController,
 } from "../controllers/prescription.controller";
-
-
-
-
 
 const router = express.Router();
 
@@ -57,7 +52,10 @@ router.use(authenticate);
 // ============================================
 // PRESCRIPTION UPLOAD & PARSING
 // ============================================
+router.get("/clinical-summary", getClinicalSummaryController);
 
+// Download clinical summary as PDF
+router.get("/clinical-summary/pdf", downloadClinicalSummaryPDFController);
 // Upload and parse prescription (returns parsed data for user to review)
 router.post("/upload", upload.single("prescription"), prescriptionUploadController);
 
@@ -97,11 +95,7 @@ router.get("/:prescriptionId/feedback", getPrescriptionFeedbackController);
 // CLINICAL SUMMARY
 // ============================================
 
-// Get clinical summary report
-router.get("/clinical-summary", getClinicalSummaryController);
 
-// Download clinical summary as PDF
-router.get("/clinical-summary/pdf", downloadClinicalSummaryPDFController);
 
 // ============================================
 // TEST TRACKING ROUTES
@@ -159,8 +153,9 @@ router.get("/:id", prescriptionGetByIdController);
 
 // Get prescription details (detailed view with reminders, tests, feedback)
 router.get("/:id/details", prescriptionGetDetailsController);
+
 // ============================================
-// NEW ROUTES - TEST TRACKING
+// NEW ROUTES - TEST TRACKING (duplicate section from above)
 // ============================================
 
 // Get all pending tests for user
@@ -185,7 +180,7 @@ router.patch("/:prescriptionId/tests/:testId/cancel", cancelTestController);
 router.get("/:prescriptionId/tests/all-completed", checkAllTestsCompletedController);
 
 // ============================================
-// NEW ROUTES - PRESCRIPTION COMPLETION & FEEDBACK
+// NEW ROUTES - PRESCRIPTION COMPLETION & FEEDBACK (duplicate section from above)
 // ============================================
 
 // Complete prescription with feedback survey
@@ -195,9 +190,6 @@ router.post("/:prescriptionId/complete", completePrescriptionController);
 router.get("/:prescriptionId/feedback", getPrescriptionFeedbackController);
 
 // Get clinical summary report
-router.get("/clinical-summary", getClinicalSummaryController);
 
-// Download clinical summary as PDF
-router.get("/clinical-summary/pdf", downloadClinicalSummaryPDFController);
 
 export default router;
