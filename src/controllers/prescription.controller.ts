@@ -583,6 +583,7 @@ export const completePrescriptionController = async (
     throw createServiceError("Invalid prescription ID", 400);
   }
 
+  console.log("Feedback Data Received:", feedbackData);
   // Validate required feedback fields
   const requiredFields = [
     "overallImprovement",
