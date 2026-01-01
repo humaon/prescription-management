@@ -1,4 +1,4 @@
-// CREATE NEW FILE: src/services/notification.service.ts
+// src/services/notification.service.ts
 
 import admin from "firebase-admin";
 import { Types } from "mongoose";
@@ -9,15 +9,30 @@ export const initializeFirebase = () => {
   if (firebaseInitialized) return;
 
   try {
-  const path = require('path');
-const serviceAccount = require(path.join(__dirname, '..', 'config', 'firebase-service-account.json'));
+    console.log("🔧 Initializing Firebase with environment variables...");
     
+    // Validate required environment variables
+    if (!process.env.FIREBASE_PROJECT_ID) {
+      throw new Error("FIREBASE_PROJECT_ID environment variable is required");
+    }
+    if (!process.env.FIREBASE_CLIENT_EMAIL) {
+      throw new Error("FIREBASE_CLIENT_EMAIL environment variable is required");
+    }
+    if (!process.env.FIREBASE_PRIVATE_KEY) {
+      throw new Error("FIREBASE_PRIVATE_KEY environment variable is required");
+    }
+
     admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
+      credential: admin.credential.cert({
+        projectId: process.env.FIREBASE_PROJECT_ID,
+        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      }),
     });
 
     firebaseInitialized = true;
     console.log("✅ Firebase Admin SDK initialized successfully");
+    console.log(`📋 Project ID: ${process.env.FIREBASE_PROJECT_ID}`);
   } catch (error) {
     console.error("❌ Failed to initialize Firebase Admin SDK:", error);
     throw error;
@@ -61,9 +76,8 @@ export const sendMedicationReminder = async (
       priority: "high",
       notification: {
         channelId: "alarm_channel",
-    sound: "alarm_sound",
+        sound: "alarm_sound",
         priority: "high",
-        
         icon: "ic_medication",
         color: "#4CAF50",
         tag: `med_${notification.medicineName}`,
