@@ -1,19 +1,27 @@
 import fs from "fs";
 import pdfParse from "pdf-parse-new";
-import Tesseract from "tesseract.js";
+import { visionClient } from "../config/vision.config";
 
-export const extractTextFromImage = async (
-  imagePath: string
-): Promise<string> => {
-  const result = await Tesseract.recognize(imagePath, "eng");
+export async function extractTextFromImage(imagePath: string): Promise<string> {
+  if (!fs.existsSync(imagePath)) {
+    throw new Error("File not found");
+  }
 
-  const text = result.data.text;
-  if (!text || text.trim().length < 20) {
+  console.log("🔍 Running Google Vision DOCUMENT OCR...");
+  const [result] = await visionClient.documentTextDetection(imagePath);
+
+  const fullText =
+    result.fullTextAnnotation?.text ||
+    result.textAnnotations?.[0]?.description ||
+    "";
+  console.log(`✅ OCR complete — Text length: ${fullText.length}`);
+
+  if (!fullText || fullText.trim().length < 20) {
     throw new Error("Insufficient text extracted from image");
   }
 
-  return text;
-};
+  return fullText;
+}
 
 export const extractTextFromPDF = async (filePath: string): Promise<string> => {
   const buffer = fs.readFileSync(filePath);

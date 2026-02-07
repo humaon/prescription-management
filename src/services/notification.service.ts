@@ -2,6 +2,7 @@
 
 import admin from "firebase-admin";
 import { Types } from "mongoose";
+import { appConfig } from "../config/app.config";
 
 let firebaseInitialized = false;
 
@@ -10,29 +11,18 @@ export const initializeFirebase = () => {
 
   try {
     console.log("🔧 Initializing Firebase with environment variables...");
-    
-    // Validate required environment variables
-    if (!process.env.FIREBASE_PROJECT_ID) {
-      throw new Error("FIREBASE_PROJECT_ID environment variable is required");
-    }
-    if (!process.env.FIREBASE_CLIENT_EMAIL) {
-      throw new Error("FIREBASE_CLIENT_EMAIL environment variable is required");
-    }
-    if (!process.env.FIREBASE_PRIVATE_KEY) {
-      throw new Error("FIREBASE_PRIVATE_KEY environment variable is required");
-    }
 
     admin.initializeApp({
       credential: admin.credential.cert({
-        projectId: process.env.FIREBASE_PROJECT_ID,
-        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        projectId: appConfig.FIREBASE_PROJECT_ID,
+        privateKey: appConfig.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+        clientEmail: appConfig.FIREBASE_CLIENT_EMAIL,
       }),
     });
 
     firebaseInitialized = true;
     console.log("✅ Firebase Admin SDK initialized successfully");
-    console.log(`📋 Project ID: ${process.env.FIREBASE_PROJECT_ID}`);
+    console.log(`📋 Project ID: ${appConfig.FIREBASE_PROJECT_ID}`);
   } catch (error) {
     console.error("❌ Failed to initialize Firebase Admin SDK:", error);
     throw error;
@@ -49,7 +39,7 @@ export interface MedicationNotification {
 
 export const sendMedicationReminder = async (
   fcmToken: string,
-  notification: MedicationNotification
+  notification: MedicationNotification,
 ): Promise<void> => {
   if (!firebaseInitialized) {
     throw new Error("Firebase not initialized");
@@ -107,12 +97,14 @@ export const sendMedicationReminder = async (
     console.log(`✅ Notification sent successfully:`, response);
   } catch (error: any) {
     console.error(`❌ Error sending notification:`, error);
-    
-    if (error.code === "messaging/invalid-registration-token" ||
-        error.code === "messaging/registration-token-not-registered") {
+
+    if (
+      error.code === "messaging/invalid-registration-token" ||
+      error.code === "messaging/registration-token-not-registered"
+    ) {
       throw new Error("INVALID_TOKEN");
     }
-    
+
     throw error;
   }
 };
