@@ -36,8 +36,5 @@ export const appConfig = (() => ({
   FIREBASE_PRIVATE_KEY: getEnv("FIREBASE_PRIVATE_KEY", "test"),
 
   // Cloud Vision
-  GOOGLE_APPLICATION_CREDENTIALS: getEnv(
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "cloud-vision.json",
-  ),
+  GOOGLE_APPLICATION_CREDENTIALS: getEnv("GOOGLE_APPLICATION_CREDENTIALS"),
 }))();

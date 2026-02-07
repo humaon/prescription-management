@@ -1,6 +1,8 @@
 import vision from "@google-cloud/vision";
 import { appConfig } from "./app.config";
 
-export const visionClient = new vision.ImageAnnotatorClient({
-  keyFilename: appConfig.GOOGLE_APPLICATION_CREDENTIALS,
-});
+const credentials = JSON.parse(
+  Buffer.from(appConfig.GOOGLE_APPLICATION_CREDENTIALS, "base64").toString(),
+);
+
+export const visionClient = new vision.ImageAnnotatorClient({ credentials });
