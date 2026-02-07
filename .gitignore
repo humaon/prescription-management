@@ -4,4 +4,4 @@ node_modules/
 
 dist/
 
-*.traineddata
+cloud-vision.json
