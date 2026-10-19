@@ -9,6 +9,15 @@ import {
   prescriptionGetCurrentController,
   getActiveMedicationsController,
   getUserRemindersController,
+  getReminderScheduleController,
+  getAdherenceController,
+  checkMedicinesController,
+  createShareLinkController,
+  listShareLinksController,
+  revokeShareLinkController,
+  setReminderStockController,
+  getUpcomingFollowUpsController,
+  setDoseTakenController,
   prescriptionGetByIdController,
   prescriptionGetDetailsController,
   prescriptionDeleteByIdController,
@@ -17,6 +26,7 @@ import {
   getHealthInsightsController,
   getPendingTestsController,
   completeTestController,
+  getTestReportController,
   getPrescriptionTestsController,
   getCompletedTestsController,
   cancelTestController,
@@ -38,9 +48,8 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024, // 10MB limit
   },
   fileFilter: (req, file, cb) => {
-    // Accept images only
-    if (!file.mimetype.startsWith("image/")) {
-      return cb(new Error("Only image files are allowed!"));
+    if (!file.mimetype.startsWith("image/") && file.mimetype !== "application/pdf") {
+      return cb(new Error("Only image or PDF files are allowed!"));
     }
     cb(null, true);
   },
@@ -54,10 +63,16 @@ router.use(authenticate);
 // ============================================
 router.get("/clinical-summary", getClinicalSummaryController);
 
+// Read-only summary links for a doctor
+router.post("/share", createShareLinkController);
+router.get("/share", listShareLinksController);
+router.delete("/share/:id", revokeShareLinkController);
+
 // Download clinical summary as PDF
 router.get("/clinical-summary/pdf", downloadClinicalSummaryPDFController);
 // Upload and parse prescription (returns parsed data for user to review)
-router.post("/upload", upload.single("prescription"), prescriptionUploadController);
+// Up to 5 pages (images or PDFs) under the same field name
+router.post("/upload", upload.array("prescription", 5), prescriptionUploadController);
 
 // ============================================
 // PRESCRIPTION CRUD
@@ -65,6 +80,9 @@ router.post("/upload", upload.single("prescription"), prescriptionUploadControll
 
 // Save prescription after user reviews/edits the parsed data
 router.post("/save", prescriptionSaveController);
+
+// Duplicate-medicine warnings before saving
+router.post("/check-medicines", checkMedicinesController);
 
 router.patch(
   "/:prescriptionId/tests/:testId/complete",
@@ -113,8 +131,8 @@ router.get("/tests/stats", getTestStatsController);
 // Get all tests for a specific prescription
 router.get("/:prescriptionId/tests", getPrescriptionTestsController);
 
-// Mark test as completed and upload report
-router.patch("/:prescriptionId/tests/:testId/complete", completeTestController);
+// Download a test's report (owner only)
+router.get("/:prescriptionId/tests/:testId/report", getTestReportController);
 
 // Cancel a test
 router.patch("/:prescriptionId/tests/:testId/cancel", cancelTestController);
@@ -145,6 +163,22 @@ router.get("/active-medications", getActiveMedicationsController);
 // Get user reminders
 router.get("/reminders", getUserRemindersController);
 
+// All active reminders + dose times (the phone schedules local alarms from it)
+router.get("/reminders/schedule", getReminderScheduleController);
+
+// Doses taken vs due (?days=7)
+router.get("/adherence", getAdherenceController);
+
+// Upcoming follow-up visits
+router.get("/follow-ups/upcoming", getUpcomingFollowUpsController);
+
+// Mark (POST) / unmark (DELETE) today's dose for a reminder; body: { slot }
+router.post("/reminders/:id/taken", setDoseTakenController);
+router.delete("/reminders/:id/taken", setDoseTakenController);
+
+// Units on hand for refill alerts; body: { count }
+router.put("/reminders/:id/stock", setReminderStockController);
+
 // Get all prescriptions
 router.get("/", prescriptionGetAllController);
 
@@ -153,43 +187,5 @@ router.get("/:id", prescriptionGetByIdController);
 
 // Get prescription details (detailed view with reminders, tests, feedback)
 router.get("/:id/details", prescriptionGetDetailsController);
-
-// ============================================
-// NEW ROUTES - TEST TRACKING (duplicate section from above)
-// ============================================
-
-// Get all pending tests for user
-router.get("/tests/pending", getPendingTestsController);
-
-// Get all completed tests for user
-router.get("/tests/completed", getCompletedTestsController);
-
-// Get test statistics
-router.get("/tests/stats", getTestStatsController);
-
-// Get all tests for a specific prescription
-router.get("/:prescriptionId/tests", getPrescriptionTestsController);
-
-// Mark test as completed and upload report
-router.patch("/:prescriptionId/tests/:testId/complete", completeTestController);
-
-// Cancel a test
-router.patch("/:prescriptionId/tests/:testId/cancel", cancelTestController);
-
-// Check if all tests are completed for a prescription
-router.get("/:prescriptionId/tests/all-completed", checkAllTestsCompletedController);
-
-// ============================================
-// NEW ROUTES - PRESCRIPTION COMPLETION & FEEDBACK (duplicate section from above)
-// ============================================
-
-// Complete prescription with feedback survey
-router.post("/:prescriptionId/complete", completePrescriptionController);
-
-// Get feedback for a specific prescription
-router.get("/:prescriptionId/feedback", getPrescriptionFeedbackController);
-
-// Get clinical summary report
-
 
 export default router;

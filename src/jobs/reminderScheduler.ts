@@ -1,7 +1,19 @@
 // src/jobs/reminderScheduler.ts
-import { getDueRemindersService } from "../services/prescription.service";
+import {
+  getDueRemindersService,
+  getFollowUpsToNotifyService,
+  getPendingTestRemindersService,
+  getLowStockRemindersService,
+} from "../services/prescription.service";
 import { ReminderModel } from "../models/reminder.model";
-import { sendMedicationReminder, MedicationNotification } from "../services/notification.service";
+import { PrescriptionModel } from "../models/prescription.model";
+import {
+  sendMedicationReminder,
+  sendFollowUpReminder,
+  sendPendingTestsReminder,
+  sendRefillReminder,
+  MedicationNotification,
+} from "../services/notification.service";
 import { getUserFCMTokens, deactivateFCMToken, cleanupInactiveTokens } from "../services/fcm.service";
 
 /**
@@ -58,10 +70,123 @@ const sendNotification = async (
 };
 
 /**
+ * Follow-up visit notifications, once each per visit date
+ */
+export const runFollowUpReminders = async (when: "tomorrow" | "today") => {
+  const due = await getFollowUpsToNotifyService(when);
+  const mark = when === "tomorrow" ? "followUp.notifiedAt" : "followUp.dayOfNotifiedAt";
+  for (const p of due) {
+    const userId = p.userId.toString();
+    const tokens = await getUserFCMTokens(userId);
+    for (const token of tokens) {
+      try {
+        await sendFollowUpReminder(token, {
+          userId,
+          prescriptionId: p._id,
+          doctorName: p.doctor?.name ?? null,
+          date: p.followUp!.date!,
+          note: p.followUp?.note ?? null,
+          when,
+          pendingTests: (p.tests ?? []).filter((t: any) => t.status === "pending").map((t: any) => t.name),
+          hasReports: (p.tests ?? []).some((t: any) => t.status === "completed"),
+        });
+      } catch (error: any) {
+        if (error.message === "INVALID_TOKEN") await deactivateFCMToken(token);
+        else console.error(`❌ Follow-up notification failed for user ${userId}:`, error);
+      }
+    }
+    await PrescriptionModel.updateOne({ _id: p._id }, { [mark]: new Date() });
+  }
+  console.log(`📅 Follow-up (${when}) reminders processed: ${due.length}`);
+  return due.length;
+};
+
+/**
+ * "Tests still pending" nudges (day 3 and day 7 after the prescription)
+ */
+export const runPendingTestReminders = async () => {
+  const due = await getPendingTestRemindersService();
+  for (const { prescription: p, stage, days, tests } of due) {
+    const userId = p.userId.toString();
+    const tokens = await getUserFCMTokens(userId);
+    for (const token of tokens) {
+      try {
+        await sendPendingTestsReminder(token, {
+          userId,
+          prescriptionId: p._id.toString(),
+          testNames: tests.map((t: any) => t.name),
+          doctorName: p.doctor?.name ?? null,
+          days,
+        });
+      } catch (error: any) {
+        if (error.message === "INVALID_TOKEN") await deactivateFCMToken(token);
+        else console.error(`❌ Pending-test notification failed for user ${userId}:`, error);
+      }
+    }
+    const ids = tests.map((t: any) => t._id);
+    await PrescriptionModel.updateOne(
+      { _id: p._id },
+      { $set: { "tests.$[t].reminderStage": stage } },
+      { arrayFilters: [{ "t._id": { $in: ids } }] }
+    );
+  }
+  console.log(`🧪 Pending-test reminders processed: ${due.length}`);
+  return due.length;
+};
+
+/**
+ * "Running low" alerts for medicines whose stock is tracked
+ */
+export const runRefillReminders = async () => {
+  const low = await getLowStockRemindersService();
+  for (const { reminder: r, daysLeft } of low) {
+    const userId = r.userId.toString();
+    const tokens = await getUserFCMTokens(userId);
+    for (const token of tokens) {
+      try {
+        await sendRefillReminder(token, {
+          userId,
+          reminderId: r._id.toString(),
+          medicineName: r.medicineName,
+          stockCount: r.stockCount ?? 0,
+          daysLeft,
+        });
+      } catch (error: any) {
+        if (error.message === "INVALID_TOKEN") await deactivateFCMToken(token);
+        else console.error(`❌ Refill notification failed for user ${userId}:`, error);
+      }
+    }
+    await ReminderModel.updateOne({ _id: r._id }, { refillAlertedAt: new Date() });
+  }
+  console.log(`💊 Refill reminders processed: ${low.length}`);
+  return low.length;
+};
+
+/**
  * Run reminders for a specific time slot (exported for individual endpoints)
  */
 export const runRemindersForTimeSlot = async (timeSlot: "morning" | "noon" | "night") => {
   console.log(`⏰ Starting ${timeSlot} reminder job at ${new Date().toISOString()}`);
+
+  try {
+    await runFollowUpReminders("tomorrow");
+    // "Visit today" makes no sense at night
+    if (timeSlot !== "night") await runFollowUpReminders("today");
+  } catch (error) {
+    console.error("❌ Follow-up reminder error:", error);
+  }
+  if (timeSlot === "morning") {
+    try {
+      await runPendingTestReminders();
+    } catch (error) {
+      console.error("❌ Pending-test reminder error:", error);
+    }
+    try {
+      await runRefillReminders();
+    } catch (error) {
+      console.error("❌ Refill reminder error:", error);
+    }
+  }
   
   const reminders = await getDueRemindersService(timeSlot);
   console.log(`🔍 Retrieved ${reminders.length} due reminders for ${timeSlot}`);
@@ -78,10 +203,17 @@ export const runRemindersForTimeSlot = async (timeSlot: "morning" | "noon" | "ni
       console.warn(`⚠️ Reminder ${reminder._id} has no userId, skipping`);
       continue;
     }
-  
+    // The user's phone rings its own alarm for this dose
+    const owner = reminder.userId as any;
+    if (owner.localAlarms) continue;
+    // A family member's medicine says whose it is
+    const profileName = reminder.profileId
+      ? owner.profiles?.find((p: any) => p._id.equals(reminder.profileId))?.name
+      : null;
+
     await sendNotification(
-      reminder?.userId?._id.toString(),
-      reminder.medicineName,
+      owner._id.toString(),
+      profileName ? `${profileName}: ${reminder.medicineName}` : reminder.medicineName,
       reminder.dosage,
       timeSlot,
       reminder.prescriptionId?.toString()

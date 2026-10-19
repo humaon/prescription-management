@@ -1,5 +1,5 @@
 // src/models/user.model.ts (UPDATED)
-import mongoose, { Document, Schema } from "mongoose";
+import mongoose, { Document, Schema, Types } from "mongoose";
 
 // FCM Device Token Interface
 export interface IDeviceToken {
@@ -25,11 +25,20 @@ export interface IUser extends Document {
     emailNotifications: boolean;
     pushNotifications: boolean;
   };
+  // Dose times ("HH:MM", app timezone) for the three reminder slots
+  reminderTimes: { morning: string; noon: string; night: string };
+  // The phone schedules medicine alarms itself → no server push for doses
+  localAlarms: boolean;
+  // Known allergies (from prescriptions and the user), checked against new medicines
+  allergies: string[];
+  // Family members whose prescriptions this account manages (the holder is implicit)
+  profiles: Array<{ _id: Types.ObjectId; name: string; relation: string | null; allergies: string[] }>;
   createdAt: Date;
   updatedAt: Date;
 }
 
-// Device Token Sub-Schema
+export const DEFAULT_REMINDER_TIMES = { morning: "08:00", noon: "13:00", night: "20:00" };
+
 // Device Token Sub-Schema
 const DeviceTokenSchema = new Schema<IDeviceToken>(
   {
@@ -88,6 +97,27 @@ const userSchema = new Schema<IUser>(
         emailNotifications: false,
         pushNotifications: true,
       },
+    },
+
+    reminderTimes: {
+      morning: { type: String, default: DEFAULT_REMINDER_TIMES.morning },
+      noon: { type: String, default: DEFAULT_REMINDER_TIMES.noon },
+      night: { type: String, default: DEFAULT_REMINDER_TIMES.night },
+    },
+    localAlarms: { type: Boolean, default: false },
+    allergies: { type: [String], default: [] },
+    profiles: {
+      type: [
+        new Schema(
+          {
+            name: { type: String, required: true, trim: true, maxlength: 60 },
+            relation: { type: String, default: null, maxlength: 40 },
+            allergies: { type: [String], default: [] },
+          },
+          { _id: true }
+        ),
+      ],
+      default: [],
     },
   },
   { timestamps: true }

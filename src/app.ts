@@ -12,6 +12,7 @@ import prescriptionRoutes from "./routes/prescription.route";
 import fcmRoutes from "./routes/fcm.route";
 import testNotificationRoutes from "./routes/notificationTest.route";
 import { runRemindersForTimeSlot, runCleanupJobs } from "./jobs/reminderScheduler";
+import { expiredPage, renderSharedSummary } from "./services/share.service";
 
 const app = express();
 
@@ -35,7 +36,32 @@ app.use(`/auth`, authRoutes);
 app.use(`${appConfig.BASE_PATH}/users`, userRoutes);
 app.use(`${appConfig.BASE_PATH}/prescriptions`, prescriptionRoutes);
 app.use(`${appConfig.BASE_PATH}/fcm`, fcmRoutes);
-app.use("/test", testNotificationRoutes);
+if (appConfig.NODE_ENV !== "production") {
+  app.use("/test", testNotificationRoutes);
+}
+
+// Public, read-only patient summary for a doctor (link shared by the patient)
+app.get("/share/:token", async (req, res) => {
+  res.set({
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Robots-Tag": "noindex, nofollow",
+    "X-Content-Type-Options": "nosniff",
+  });
+  const html = await renderSharedSummary(String(req.params.token));
+  res.status(html ? 200 : 404).type("html").send(html ?? expiredPage());
+});
+
+// Cloud Scheduler endpoints are public URLs; when CRON_SECRET is set,
+// require it in the x-cron-secret header so others can't trigger mass notifications
+app.use("/cron", (req, res, next) => {
+  if (appConfig.CRON_SECRET && req.get("x-cron-secret") !== appConfig.CRON_SECRET) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  next();
+});
 
 // Cloud Scheduler endpoints - Morning reminders (8:00 AM)
 app.post("/cron/reminders/morning", async (_req, res) => {
@@ -82,8 +108,6 @@ app.post("/cron/reminders/noon", async (_req, res) => {
 // Cloud Scheduler endpoints - Night reminders (8:00 PM)
 app.post("/cron/reminders/night", async (_req, res) => {
   try {
-    app.use("/uploads", express.static("uploads"));
-
     console.log("🌙 Night reminder cron triggered");
     const count = await runRemindersForTimeSlot("night");
     res.status(200).json({ 

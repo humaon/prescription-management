@@ -1,6 +1,8 @@
 import { Router } from "express";
 import passport from "passport";
+import { authenticate } from "../middleware/authenticate.middleware";
 import {
+  deleteAccountController,
   googleCallbackController,
   loginController,
   signupEmailController,
@@ -26,6 +28,9 @@ router.post(
 router.post("/verify-otp", validateOtpVerify, signupMobileVerifyController);
 
 router.post("/login", loginController);
+
+// Permanently delete the signed-in user's account and data
+router.delete("/me", authenticate, deleteAccountController);
 
 router.get(
   "/google",
