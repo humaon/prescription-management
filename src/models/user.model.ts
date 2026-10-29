@@ -23,7 +23,6 @@ export interface IUser extends Document {
   language: "en" | "bn";
   voiceReminders: boolean;
   bloodGroup?: string | null;
-  allergies: string[];
   chronicConditions: string[];
   emergencyContacts: { name: string; phone: string; relation?: string }[];
   deviceTokens: IDeviceToken[]; // NEW
@@ -91,7 +90,6 @@ const userSchema = new Schema<IUser>(
     language: { type: String, enum: ["en", "bn"], default: "bn" },
     voiceReminders: { type: Boolean, default: false },
     bloodGroup: { type: String, default: null },
-    allergies: { type: [String], default: [] },
     chronicConditions: { type: [String], default: [] },
     emergencyContacts: {
       type: [

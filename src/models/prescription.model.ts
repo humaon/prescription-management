@@ -75,11 +75,8 @@ export interface IFollowUp {
 
 export interface IPrescriptionDocument extends Document {
   userId: Types.ObjectId;
-<<<<<<< HEAD
   familyMemberId?: Types.ObjectId | null;
-=======
   profileId?: Types.ObjectId | null; // family member; null = the account holder
->>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
   doctor: IDoctorInfo;
   patient: IPatientInfo;
   symptoms: string[];
@@ -215,16 +212,13 @@ const PrescriptionSchema = new Schema<IPrescriptionDocument>(
       required: true,
       index: true,
     },
-<<<<<<< HEAD
     familyMemberId: {
       type: Schema.Types.ObjectId,
       ref: "FamilyMember",
       default: null,
       index: true,
     },
-=======
     profileId: { type: Schema.Types.ObjectId, default: null, index: true },
->>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
     // Doctor Information
     doctor: { type: DoctorInfoSchema, required: true },

@@ -1,8 +1,6 @@
 import fs from "fs";
 import path from "path";
 import pdfParse from "pdf-parse-new";
-<<<<<<< HEAD
-=======
 import { appConfig } from "../config/app.config";
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -68,7 +66,6 @@ export async function extractTextFromImage(
 
   return fullText;
 }
->>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
 export const extractTextFromPDF = async (filePath: string): Promise<string> => {
   const buffer = fs.readFileSync(filePath);

@@ -1,6 +1,5 @@
 import { appConfig } from "../config/app.config";
 
-const GEMINI_MODEL = "gemini-3.8-flash";
 
 export interface GeminiImagePart {
   mimeType: string;
@@ -12,7 +11,7 @@ export async function geminiJson<T = any>(
   image?: GeminiImagePart,
   timeoutMs = 45000
 ): Promise<T> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${appConfig.GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${appConfig.GEMINI_MODEL}:generateContent?key=${appConfig.GEMINI_API_KEY}`;
 
   const parts: any[] = [{ text: prompt }];
   if (image) parts.push({ inlineData: { mimeType: image.mimeType, data: image.base64 } });

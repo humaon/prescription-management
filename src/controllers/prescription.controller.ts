@@ -1,10 +1,8 @@
 import { Request, Response } from "express";
 import fs from "fs/promises";
 import mongoose from "mongoose";
-<<<<<<< HEAD
 import { uploadToStorage } from "../lib/storage";
 import { withAiQuota } from "../services/aiQuota.service";
-=======
 import { extractTextFromImage } from "../lib/ocr";
 import { openReport, saveReport } from "../lib/reportStorage";
 import { LabReport, readLabReport } from "../lib/reportReader";
@@ -13,10 +11,9 @@ import {
   listShareLinksService,
   revokeShareLinkService,
 } from "../services/share.service";
->>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 import { createServiceError, createSuccessResponse } from "../lib/utils";
 import {
-  prescriptionParseFromImageService,
+  prescriptionParseService,
   prescriptionSaveService,
   prescriptionUpdateService,
   prescriptionGetAllService,
@@ -69,33 +66,25 @@ export const prescriptionUploadController = async (
   }
 
   try {
-<<<<<<< HEAD
-    // One Gemini call: read the photo and parse it (counts against the daily free scan limit)
-    const { parsed, ocrText } = await withAiQuota(req.userId, "scan", () =>
-      prescriptionParseFromImageService(imagePath)
-    );
-=======
-    // Every page (image or PDF) is read in parallel, then parsed as one prescription
-    const pages = await Promise.all(files.map((f) => extractTextFromImage(f.path, f.mimetype)));
-    const extractedText =
-      pages.length === 1 ? pages[0] : pages.map((t, i) => `--- Page ${i + 1} ---\n${t}`).join("\n\n");
->>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
+    // Every page (image or PDF) is read in parallel, then parsed as one prescription.
+    // The whole scan counts as one use of the daily free scan limit.
+    const { parsed, ocrText } = await withAiQuota(req.userId, "scan", async () => {
+      const pages = await Promise.all(files.map((f) => extractTextFromImage(f.path, f.mimetype)));
+      const text =
+        pages.length === 1 ? pages[0] : pages.map((t, i) => `--- Page ${i + 1} ---\n${t}`).join("\n\n");
+      return { parsed: await prescriptionParseService(text), ocrText: text };
+    });
 
     // Keep the original photo (Cloudinary). Best-effort: the AI read already succeeded,
     // so a storage hiccup must not throw the result away.
     let imageUrl: string | null = null;
     try {
-      imageUrl = await uploadToStorage(imagePath, "prescriptions");
+      imageUrl = await uploadToStorage(files[0].path, "prescriptions");
     } catch (e) {
       console.warn("⚠️ Prescription image storage failed, continuing without it:", e);
     }
 
-<<<<<<< HEAD
-    // Clean up local temp file
-    await fs.unlink(imagePath);
-=======
     await cleanup();
->>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
     // Return parsed data for user to review/edit
     res.status(200).json(
@@ -476,15 +465,7 @@ export const completeTestController = async (req: Request, res: Response) => {
     console.error("❌ Lab report read failed:", error);
   }
 
-<<<<<<< HEAD
-  // Upload test report to Cloudinary
-  const reportUrl = await uploadToStorage(req.file.path, "test-reports");
-
-  // Clean up local temp file
-  await fs.unlink(req.file.path).catch(() => {});
-=======
   const reportKey = await saveReport(req.file.path, req.file.mimetype, req.userId);
->>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
   const result = await completeTestService(prescriptionId, testId, req.userId, {
     reportKey,
@@ -752,20 +733,15 @@ export const getClinicalSummaryController = async (
   }
 
   const summary = await getDetailedClinicalSummaryService(req.userId);
-<<<<<<< HEAD
-
   // The AI narrative is a bonus: if the daily free limit is hit, still return the summary data
   let narrative: string | null = null;
   try {
     narrative = await withAiQuota(req.userId, "summary", () =>
-      generateAIClinicalNarrativeService(req.userId!, summary)
+      getClinicalNarrativeService(req.userId!, summary)
     );
   } catch (e: any) {
     if (e?.statusCode !== 429 && e?.statusCode !== 503) throw e;
   }
-=======
-  const narrative = await getClinicalNarrativeService(req.userId, summary);
->>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
   res
     .status(200)

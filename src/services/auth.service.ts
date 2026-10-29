@@ -4,6 +4,20 @@ import { comparePassword, hashPassword } from "../lib/password";
 import { IUser, User } from "../models/user.model";
 import { currencyForCountry, languageForCountry } from "../lib/currency";
 import { sendEmailOTP, sendOTP, verifyEmailOTP, verifyOTP } from "./otp.service";
+import { deleteReport } from "../lib/reportStorage";
+import { PrescriptionModel } from "../models/prescription.model";
+import { ReminderModel } from "../models/reminder.model";
+import { DoseLogModel } from "../models/doseLog.model";
+import { PrescriptionFeedbackModel } from "../models/PrescriptionFeedback.model";
+import { OTP } from "../models/otp.model";
+import { ShareLinkModel } from "../models/shareLink.model";
+import { ClinicalNarrativeModel } from "../models/clinicalNarrative.model";
+import { MedicalExpenseModel } from "../models/medicalExpense.model";
+import { FamilyMemberModel } from "../models/familyMember.model";
+import { MedicineTakenLogModel } from "../models/medicineTakenLog.model";
+import { CareLinkModel } from "../models/careLink.model";
+import { LabReportModel } from "../models/labReport.model";
+import { AiUsageModel } from "../models/aiUsage.model";
 
 export const requestEmailOtpService = async (email: string): Promise<void> => {
   const existingUser = await User.findOne({ email });
@@ -113,19 +127,25 @@ export const deleteAccountService = async (userId: string) => {
 
   const prescriptions = await PrescriptionModel.find({ userId: user._id }, { tests: 1 });
 
-  // Remove uploaded test report files from disk
-  const reportFiles = prescriptions
-    .flatMap((p) => p.tests || [])
-    .map((t) => t.reportUrl)
-    .filter((url): url is string => !!url && url.includes("/uploads/"))
-    .map((url) => path.join(process.cwd(), appConfig.UPLOAD_DIR, path.basename(url)));
-  await Promise.all(reportFiles.map((file) => fs.unlink(file).catch(() => undefined)));
+  // Remove stored test report files
+  await Promise.all(
+    prescriptions.flatMap((p) => p.tests || []).map((t) => deleteReport(t.reportUrl))
+  );
 
+  const uid = user._id;
   await Promise.all([
-    PrescriptionFeedbackModel.deleteMany({ userId: user._id }),
-    ReminderModel.deleteMany({ userId: user._id }),
-    DoseLogModel.deleteMany({ userId: user._id }),
-    PrescriptionModel.deleteMany({ userId: user._id }),
+    PrescriptionFeedbackModel.deleteMany({ userId: uid }),
+    ReminderModel.deleteMany({ userId: uid }),
+    DoseLogModel.deleteMany({ userId: uid }),
+    MedicineTakenLogModel.deleteMany({ userId: uid }),
+    PrescriptionModel.deleteMany({ userId: uid }),
+    ShareLinkModel.deleteMany({ userId: uid }),
+    ClinicalNarrativeModel.deleteMany({ userId: uid }),
+    MedicalExpenseModel.deleteMany({ userId: uid }),
+    FamilyMemberModel.deleteMany({ userId: uid }),
+    LabReportModel.deleteMany({ userId: uid }),
+    CareLinkModel.deleteMany({ $or: [{ patientId: uid }, { caregiverId: uid }] }),
+    AiUsageModel.deleteMany({ scope: { $regex: `^u:${uid}:` } }),
     user.mobileNumber ? OTP.deleteMany({ mobileNumber: user.mobileNumber }) : Promise.resolve(),
   ]);
 

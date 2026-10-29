@@ -25,24 +25,12 @@ export async function authenticate(
     return;
   }
 
-<<<<<<< HEAD
-  let decoded: { id: string } | undefined;
-  try {
-    decoded = verifyToken(token) as { id: string };
-  } catch {
-    res.status(401).json({ error: "Session expired. Please sign in again." });
-    return;
-  }
-  if (!decoded?.id) {
-    res.status(401).json({ error: "Invalid token" });
-=======
   // Expired, malformed or tampered tokens must be 401 so the app logs the user out
   let decoded: { id: string };
   try {
     decoded = verifyToken(token) as { id: string };
   } catch {
     res.status(401).json({ error: "Invalid or expired token" });
->>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
     return;
   }
 

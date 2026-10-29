@@ -44,6 +44,7 @@ services:
     volumes:
       - ./src:/app/src
       - ./uploads:/app/uploads
+      - ./assets:/app/assets
 
 volumes:
   mongo_data:

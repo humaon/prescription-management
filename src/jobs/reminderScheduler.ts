@@ -6,10 +6,7 @@ import {
   getLowStockRemindersService,
 } from "../services/prescription.service";
 import { ReminderModel } from "../models/reminder.model";
-<<<<<<< HEAD
 import { User } from "../models/user.model";
-import { sendMedicationReminder, MedicationNotification } from "../services/notification.service";
-=======
 import { PrescriptionModel } from "../models/prescription.model";
 import {
   sendMedicationReminder,
@@ -18,7 +15,6 @@ import {
   sendRefillReminder,
   MedicationNotification,
 } from "../services/notification.service";
->>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 import { getUserFCMTokens, deactivateFCMToken, cleanupInactiveTokens } from "../services/fcm.service";
 
 /**

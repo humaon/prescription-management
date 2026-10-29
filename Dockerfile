@@ -14,6 +14,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
+COPY assets ./assets
 # Uploads are temporary (images go to Cloudinary); the folder must be writable by the non-root user
 RUN mkdir -p uploads && chown -R node:node /app
 USER node
