@@ -2,6 +2,31 @@ import { Request, Response } from "express";
 import { sendMedicationReminder, MedicationNotification } from "../services/notification.service";
 import { getUserFCMTokens } from "../services/fcm.service";
 
+// Direct token test — no userId needed
+export const testDirectToken = async (req: Request, res: Response) => {
+  try {
+    const { token, medicineName = "Paracetamol", dosage = "500mg", timeSlot = "morning", voice = false, language = "en" } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ message: "FCM token is required" });
+    }
+
+    const notification: MedicationNotification = {
+      userId: "test-user",
+      medicineName,
+      dosage,
+      timeSlot,
+      voice: !!voice,
+      language: language === "bn" ? "bn" : "en",
+    };
+
+    await sendMedicationReminder(token, notification);
+    res.json({ success: true, message: "Notification sent successfully" });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 export const testSendReminder = async (req: Request, res: Response) => {
   try {
     const { userId, medicineName, dosage, timeSlot = "morning" } = req.body;

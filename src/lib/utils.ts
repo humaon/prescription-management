@@ -1,9 +1,9 @@
 import { ApiResponse, ServiceError } from "./types";
 
-export const getEnv = (key: string, defaultValue: string = "") => {
+export const getEnv = (key: string, defaultValue?: string) => {
   const value = process.env[key];
   if (value === undefined) {
-    if (defaultValue) {
+    if (defaultValue !== undefined) {
       return defaultValue;
     }
 

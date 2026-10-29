@@ -1,8 +1,10 @@
 import mongoose, { Document, Schema } from "mongoose";
 
 export interface IOTP extends Document {
-  mobileNumber: string;
+  mobileNumber?: string;
+  email?: string;
   code: string;
+  attempts: number;
   expiresAt: Date;
   verified: boolean;
   createdAt: Date;
@@ -11,8 +13,10 @@ export interface IOTP extends Document {
 
 const otpSchema = new Schema<IOTP>(
   {
-    mobileNumber: { type: String, required: true },
+    mobileNumber: { type: String, index: true },
+    email: { type: String, index: true },
     code: { type: String, required: true },
+    attempts: { type: Number, default: 0 },
     expiresAt: { type: Date, required: true },
     verified: { type: Boolean, default: false },
   },

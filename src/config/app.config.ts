@@ -27,8 +27,20 @@ export const appConfig = (() => ({
   GOOGLE_CLIENT_SECRET: getEnv("GOOGLE_CLIENT_SECRET"),
   GOOGLE_CALLBACK_URL: getEnv("GOOGLE_CALLBACK_URL"),
 
+  // SMTP (Gmail app password or any SMTP)
+  SMTP_HOST: getEnv("SMTP_HOST", "smtp.gmail.com"),
+  SMTP_PORT: getEnv("SMTP_PORT", "465"),
+  SMTP_USER: getEnv("SMTP_USER", ""),
+  SMTP_PASS: getEnv("SMTP_PASS", ""),
+  SMTP_FROM: getEnv("SMTP_FROM", ""),
+
   // MongoDB
   MONGO_URI: getEnv("MONGO_URI"),
+
+  // Cloudinary
+  CLOUDINARY_CLOUD_NAME: getEnv("CLOUDINARY_CLOUD_NAME", ""),
+  CLOUDINARY_API_KEY: getEnv("CLOUDINARY_API_KEY", ""),
+  CLOUDINARY_API_SECRET: getEnv("CLOUDINARY_API_SECRET", ""),
 
   // Firebase
   FIREBASE_PROJECT_ID: getEnv("FIREBASE_PROJECT_ID", "test-project"),
@@ -36,5 +48,5 @@ export const appConfig = (() => ({
   FIREBASE_PRIVATE_KEY: getEnv("FIREBASE_PRIVATE_KEY", "test"),
 
   // Cloud Vision
-  GOOGLE_APPLICATION_CREDENTIALS: getEnv("GOOGLE_APPLICATION_CREDENTIALS"),
+  GOOGLE_APPLICATION_CREDENTIALS: getEnv("GOOGLE_APPLICATION_CREDENTIALS", ""),
 }))();

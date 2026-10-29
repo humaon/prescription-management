@@ -3,18 +3,36 @@ import { MESSAGES } from "../lib/constants";
 import { signToken } from "../lib/jwt";
 import {
   loginService,
+  requestEmailOtpService,
   signupMobileRequestService,
   signupMobileVerifyService,
   signupWithEmailService,
 } from "../services/auth.service";
 
+export const requestEmailOtpController = async (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+    await requestEmailOtpService(email);
+    res.status(200).json({
+      message: "Verification code sent to your email",
+      email,
+      expiresIn: "5 minutes",
+    });
+  } catch (err: any) {
+    const status = err.message.includes("wait") ? 429 : 409;
+    res.status(status).json({ error: err.message });
+  }
+};
+
 export const signupEmailController = async (req: Request, res: Response) => {
   try {
-    const { email, password, fullName } = req.body;
+    const { email, password, fullName, code, country } = req.body;
     const { user, token } = await signupWithEmailService(
       email,
       password,
-      fullName
+      fullName,
+      code,
+      country
     );
 
     res.status(201).json({
@@ -25,10 +43,15 @@ export const signupEmailController = async (req: Request, res: Response) => {
         email: user.email,
         fullName: user.fullName,
         isVerified: user.isVerified,
+        country: user.country,
+        currency: user.currency,
+        language: user.language,
+        voiceReminders: user.voiceReminders,
       },
     });
   } catch (err: any) {
-    res.status(409).json({ error: err.message });
+    const status = err.message === MESSAGES.INVALID_OTP ? 401 : 409;
+    res.status(status).json({ error: err.message });
   }
 };
 
@@ -91,6 +114,10 @@ export const loginController = async (req: Request, res: Response) => {
         email: user.email,
         fullName: user.fullName,
         isVerified: user.isVerified,
+        country: user.country,
+        currency: user.currency,
+        language: user.language,
+        voiceReminders: user.voiceReminders,
       },
     });
   } catch (err: any) {

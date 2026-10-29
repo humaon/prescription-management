@@ -35,53 +35,76 @@ export interface MedicationNotification {
   dosage: string;
   timeSlot: "morning" | "noon" | "night";
   prescriptionId?: string | Types.ObjectId;
+  language?: "en" | "bn";
+  voice?: boolean;
 }
+
+const SLOT_BN = { morning: "সকালের", noon: "দুপুরের", night: "রাতের" };
 
 export const sendMedicationReminder = async (
   fcmToken: string,
   notification: MedicationNotification,
+  override?: { type?: string; title?: string; body?: string; extra?: Record<string, string> }
 ): Promise<void> => {
   if (!firebaseInitialized) {
     throw new Error("Firebase not initialized");
   }
 
   const timeEmoji = { morning: "🌅", noon: "☀️", night: "🌙" };
+  const isBn = notification.language === "bn";
+
+  const defaultTitle = isBn
+    ? `${timeEmoji[notification.timeSlot]} ${SLOT_BN[notification.timeSlot]} ওষুধের সময়`
+    : `${timeEmoji[notification.timeSlot]} Time to Take Your Medicine`;
+  const title = override?.title ?? defaultTitle;
+  const body = override?.body ?? `${notification.medicineName} - ${notification.dosage}`;
+  const speakText = isBn
+    ? `এখন ${SLOT_BN[notification.timeSlot]} ওষুধ খাওয়ার সময়। ${notification.medicineName}, ${notification.dosage}।`
+    : `Time to take your ${notification.timeSlot} medicine. ${notification.medicineName}, ${notification.dosage}.`;
 
   const message: admin.messaging.Message = {
     token: fcmToken,
-    notification: {
-      title: `${timeEmoji[notification.timeSlot]} Time to Take Your Medicine`,
-      body: `${notification.medicineName} - ${notification.dosage}`,
-    },
+    // Voice reminders are data-only on Android so the app can speak the text
+    // (a notification payload would be shown by the system without running our code).
+    ...(notification.voice ? {} : { notification: { title, body } }),
     data: {
-      type: "medication_reminder",
+      title,
+      body,
+      voice: notification.voice ? "1" : "0",
+      type: override?.type ?? "medication_reminder",
       medicineName: notification.medicineName,
       dosage: notification.dosage,
       timeSlot: notification.timeSlot,
       userId: notification.userId.toString(),
       prescriptionId: notification.prescriptionId?.toString() || "",
+      language: notification.language || "en",
+      speakText,
       timestamp: new Date().toISOString(),
+      ...(override?.extra || {}),
     },
     android: {
       priority: "high",
-      notification: {
-        channelId: "alarm_channel",
-        sound: "alarm_sound",
-        priority: "high",
-        icon: "ic_medication",
-        color: "#4CAF50",
-        tag: `med_${notification.medicineName}`,
-        visibility: "public",
-      },
+      // Any android.notification field turns this into a system-displayed notification
+      // message, so voice (data-only) messages must not carry it.
+      ...(notification.voice
+        ? {}
+        : {
+            notification: {
+              channelId: "alarm_channel",
+              sound: "alarm_sound",
+              priority: "high" as const,
+              icon: "ic_medication",
+              color: "#4CAF50",
+              tag: `med_${notification.medicineName}`,
+              visibility: "public" as const,
+            },
+          }),
     },
     apns: {
       headers: { "apns-priority": "10", "apns-push-type": "alert" },
       payload: {
         aps: {
-          alert: {
-            title: `${timeEmoji[notification.timeSlot]} Time to Take Your Medicine`,
-            body: `${notification.medicineName} - ${notification.dosage}`,
-          },
+          alert: { title, body },
           sound: "default",
           badge: 1,
           category: "MEDICATION_REMINDER",

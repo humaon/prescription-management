@@ -1,14 +1,53 @@
 import { Request, Response, NextFunction } from "express";
 
+// Reject objects/arrays (e.g. {"$ne": null}) so values can never act as Mongo operators
+const allStrings = (...values: unknown[]) =>
+  values.every((v) => typeof v === "string");
+
+export const validateLogin = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void => {
+  const { email, password } = req.body || {};
+  if (!allStrings(email, password) || !email || !password) {
+    res.status(400).json({ error: "Email and password required" });
+    return;
+  }
+  next();
+};
+
+export const validateEmailOtpRequest = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void => {
+  const { email } = req.body || {};
+  if (!allStrings(email) || !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    res.status(400).json({ error: "Valid email required" });
+    return;
+  }
+  next();
+};
+
 export const validateSignupEmail = (
   req: Request,
   res: Response,
   next: NextFunction
 ): void => {
-  const { email, password, fullName } = req.body;
+  const { email, password, fullName, code, country } = req.body || {};
 
-  if (!email || !password || !fullName) {
-    res.status(400).json({ error: "Email, password, and fullName required" });
+  if (
+    !allStrings(email, password, fullName, code) ||
+    (country !== undefined && !allStrings(country)) ||
+    !email ||
+    !password ||
+    !fullName ||
+    !code
+  ) {
+    res
+      .status(400)
+      .json({ error: "Email, password, fullName and verification code required" });
     return;
   }
 

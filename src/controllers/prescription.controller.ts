@@ -1,10 +1,11 @@
 import { Request, Response } from "express";
 import fs from "fs/promises";
 import mongoose from "mongoose";
-import { extractTextFromImage } from "../lib/ocr";
+import { uploadToStorage } from "../lib/storage";
+import { withAiQuota } from "../services/aiQuota.service";
 import { createServiceError, createSuccessResponse } from "../lib/utils";
 import {
-  prescriptionParseService,
+  prescriptionParseFromImageService,
   prescriptionSaveService,
   prescriptionUpdateService,
   prescriptionGetAllService,
@@ -48,21 +49,30 @@ export const prescriptionUploadController = async (
   const imagePath = req.file.path;
 
   try {
-    // Extract text from image
-    const extractedText = await extractTextFromImage(imagePath);
+    // One Gemini call: read the photo and parse it (counts against the daily free scan limit)
+    const { parsed, ocrText } = await withAiQuota(req.userId, "scan", () =>
+      prescriptionParseFromImageService(imagePath)
+    );
 
-    // Parse prescription using Gemini (but don't save yet)
-    const parsedData = await prescriptionParseService(extractedText);
+    // Keep the original photo (Cloudinary). Best-effort: the AI read already succeeded,
+    // so a storage hiccup must not throw the result away.
+    let imageUrl: string | null = null;
+    try {
+      imageUrl = await uploadToStorage(imagePath, "prescriptions");
+    } catch (e) {
+      console.warn("⚠️ Prescription image storage failed, continuing without it:", e);
+    }
 
-    // Clean up uploaded file
+    // Clean up local temp file
     await fs.unlink(imagePath);
 
     // Return parsed data for user to review/edit
     res.status(200).json(
       createSuccessResponse(
         {
-          ...parsedData,
-          ocrText: extractedText,
+          ...parsed,
+          ocrText,
+          imageUrl,
         },
         "Prescription parsed successfully. Please review and save."
       )
@@ -428,11 +438,11 @@ export const completeTestController = async (req: Request, res: Response) => {
     throw createServiceError("Invalid test ID", 400);
   }
 
-  // File path where it's stored on server
-  const reportPath = `/uploads/test-reports/${req.file.filename}`;
-  
-  // Or use full URL if you want to return full path
-  const reportUrl = `${req.protocol}://${req.get('host')}${reportPath}`;
+  // Upload test report to Cloudinary
+  const reportUrl = await uploadToStorage(req.file.path, "test-reports");
+
+  // Clean up local temp file
+  await fs.unlink(req.file.path).catch(() => {});
 
   const result = await completeTestService(
     prescriptionId,
@@ -675,7 +685,16 @@ export const getClinicalSummaryController = async (
   }
 
   const summary = await getDetailedClinicalSummaryService(req.userId);
-   const narrative = await generateAIClinicalNarrativeService(req.userId);
+
+  // The AI narrative is a bonus: if the daily free limit is hit, still return the summary data
+  let narrative: string | null = null;
+  try {
+    narrative = await withAiQuota(req.userId, "summary", () =>
+      generateAIClinicalNarrativeService(req.userId!, summary)
+    );
+  } catch (e: any) {
+    if (e?.statusCode !== 429 && e?.statusCode !== 503) throw e;
+  }
 
   res
     .status(200)

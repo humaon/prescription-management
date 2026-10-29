@@ -3,17 +3,24 @@ import passport from "passport";
 import {
   googleCallbackController,
   loginController,
+  requestEmailOtpController,
   signupEmailController,
   signupMobileRequestController,
   signupMobileVerifyController,
 } from "../controllers/auth.controller";
+import { authLimiter, otpLimiter } from "../middleware/rateLimit.middleware";
 import {
+  validateEmailOtpRequest,
+  validateLogin,
   validateOtpVerify,
   validateSignupEmail,
   validateSignupMobile,
 } from "../validation/auth.validation";
 
 const router = Router();
+router.use(authLimiter);
+
+router.post("/signup/email/request-otp", otpLimiter, validateEmailOtpRequest, requestEmailOtpController);
 
 router.post("/signup/email", validateSignupEmail, signupEmailController);
 
@@ -25,7 +32,7 @@ router.post(
 
 router.post("/verify-otp", validateOtpVerify, signupMobileVerifyController);
 
-router.post("/login", loginController);
+router.post("/login", validateLogin, loginController);
 
 router.get(
   "/google",

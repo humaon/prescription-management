@@ -3,6 +3,7 @@ import { runStartupTasks } from "./bootstrap/startup";
 import { appConfig } from "./config/app.config";
 import { connectDatabase } from "./config/db.config";
 import { initializeFirebase } from "./services/notification.service";
+import { MedicineTakenLogModel } from "./models/medicineTakenLog.model";
 
 const startServer = async () => {
   // Startup lifecycle
@@ -10,6 +11,10 @@ const startServer = async () => {
 
   // Database connection
   await connectDatabase();
+  // Drops the old (reminderId+date) unique index so per-slot logs can coexist
+  await MedicineTakenLogModel.syncIndexes().catch((e) =>
+    console.error("⚠️ MedicineTakenLog index sync failed:", e)
+  );
    try {
     initializeFirebase();
     console.log("✅ Firebase initialized for push notifications");

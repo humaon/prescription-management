@@ -1,5 +1,9 @@
+import fs from "fs";
+import path from "path";
 import { Types } from "mongoose";
 import { appConfig } from "../config/app.config";
+import { geminiJson } from "../lib/gemini";
+import { createServiceError } from "../lib/utils";
 import { getPrompt } from "../lib/prompt";
 import {
   IPrescriptionDocument,
@@ -14,6 +18,68 @@ import { parseDosageSchedule } from "../lib/dosageParser";
 import { PrescriptionFeedbackModel } from "../models/PrescriptionFeedback.model";
 import PDFDocument from 'pdfkit';
 
+
+// Validate and normalize the JSON Gemini returned for a prescription
+const finalizeParsedPrescription = (parsedData: any): ParsedPrescription => {
+  if (!validatePrescriptionParsedData(parsedData)) {
+    throw new Error("Parsed data does not match required schema");
+  }
+
+  if (parsedData.medicines.length > 0) {
+    parsedData.medicines = parsedData.medicines
+      .filter((med: any) => med.name && med.name.trim().length > 0)
+      .map((med: any) => ({
+        ...med,
+        // Normalize Bangla digits to English in dosage
+        dosage: med.dosage ? normalizeBanglaDosage(med.dosage) : med.dosage,
+      }));
+  }
+
+  parsedData.symptoms = [...new Set(parsedData.symptoms.filter(Boolean))];
+  parsedData.diagnosis = [...new Set(parsedData.diagnosis.filter(Boolean))];
+
+  return parsedData as ParsedPrescription;
+};
+
+// Read a prescription photo and parse it in ONE Gemini call (halves AI cost
+// vs. OCR-then-parse, and lets the model see handwriting directly).
+export const prescriptionParseFromImageService = async (
+  imagePath: string
+): Promise<{ parsed: ParsedPrescription; ocrText: string }> => {
+  const mimeByExt: Record<string, string> = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+  };
+  const ext = path.extname(imagePath).toLowerCase();
+  const base64 = fs.readFileSync(imagePath).toString("base64");
+
+  const prompt =
+    getPrompt(
+      "(The prescription is the attached image. Read it carefully, including handwriting and Bengali/English text.)"
+    ) +
+    `
+
+Also add one more top-level key "ocrText": a faithful plain-text transcription of everything legible in the image. If the image is not a prescription or is unreadable, return empty arrays/nulls and "ocrText": "".`;
+
+  const raw = await geminiJson<any>(
+    prompt,
+    { mimeType: mimeByExt[ext] || "image/jpeg", base64 },
+    60000
+  );
+
+  const ocrText = typeof raw.ocrText === "string" ? raw.ocrText.trim() : "";
+  delete raw.ocrText;
+
+  const parsed = finalizeParsedPrescription(raw);
+  if (parsed.medicines.length === 0 && ocrText.length < 20) {
+    throw new Error(
+      "Could not read a prescription from this image. Please upload a clearer, well-lit photo."
+    );
+  }
+  return { parsed, ocrText };
+};
 
 // Parse prescription text using Gemini API
 
@@ -44,7 +110,7 @@ export const prescriptionParseService = async (
   }
 
   const prompt = getPrompt(text);
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${appConfig.GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${appConfig.GEMINI_API_KEY}`;
 
   const payload = {
     contents: [
@@ -122,24 +188,7 @@ export const prescriptionParseService = async (
       );
     }
 
-    if (!validatePrescriptionParsedData(parsedData)) {
-      throw new Error("Parsed data does not match required schema");
-    }
-
-    if (parsedData.medicines.length > 0) {
-      parsedData.medicines = parsedData.medicines
-        .filter((med: any) => med.name && med.name.trim().length > 0)
-        .map((med: any) => ({
-          ...med,
-          // Normalize Bangla digits to English in dosage
-          dosage: med.dosage ? normalizeBanglaDosage(med.dosage) : med.dosage,
-        }));
-    }
-
-    parsedData.symptoms = [...new Set(parsedData.symptoms.filter(Boolean))];
-    parsedData.diagnosis = [...new Set(parsedData.diagnosis.filter(Boolean))];
-
-    return parsedData as ParsedPrescription;
+    return finalizeParsedPrescription(parsedData);
   } catch (error) {
     if (error instanceof Error) {
       throw new Error(`Prescription parsing failed: ${error.message}`);
@@ -158,7 +207,7 @@ export const prescriptionParseService = async (
 //   }
 
 //   const prompt = getPrompt(text);
-//   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${appConfig.GEMINI_API_KEY}`;
+//   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${appConfig.GEMINI_API_KEY}`;
 
 //   const payload = {
 //     contents: [
@@ -301,6 +350,7 @@ const createRemindersForMedicines = async (
     const schedule = parseDosageSchedule(medicine.frequency || medicine.dosage);
 
     if (schedule.totalDoses > 0) {
+      const endDate = medicine.duration ? calculateEndDate(medicine.duration) : null;
       const reminder = new ReminderModel({
         userId: new Types.ObjectId(userId),
         prescriptionId: new Types.ObjectId(prescriptionId),
@@ -313,7 +363,11 @@ const createRemindersForMedicines = async (
         },
         isActive: true,
         startDate: new Date(),
-        endDate: medicine.duration ? calculateEndDate(medicine.duration) : null,
+        endDate,
+        refillDate: endDate,
+        totalDays: endDate
+          ? Math.max(1, Math.round((endDate.getTime() - Date.now()) / 86400000))
+          : null,
       });
 
       reminders.push(await reminder.save());
@@ -383,11 +437,16 @@ export const prescriptionUpdateService = async (
   });
 
   if (!prescription) {
-    throw new Error("Prescription not found or access denied");
+    throw createServiceError("Prescription not found or access denied", 404);
   }
 
-  // Update fields
-  Object.assign(prescription, updateData);
+  // Only user-editable content may change (never userId, status, ownership flags, ...)
+  const editable = ["doctor", "patient", "symptoms", "diagnosis", "tests", "medicines", "notes"];
+  for (const key of editable) {
+    if (updateData && updateData[key] !== undefined) {
+      (prescription as any)[key] = updateData[key];
+    }
+  }
   prescription.parsedAt = new Date();
 
   const updatedPrescription = await prescription.save();
@@ -483,19 +542,19 @@ export const prescriptionDeleteByIdService = async (
   prescriptionId: string,
   userId: string
 ) => {
-  // Delete associated reminders first
-  await ReminderModel.deleteMany({
-    prescriptionId: new Types.ObjectId(prescriptionId),
-  });
-
+  // Ownership first: only the owner may delete (and only then touch reminders)
   const deletedPrescription = await PrescriptionModel.findOneAndDelete({
     _id: new Types.ObjectId(prescriptionId),
     userId: new Types.ObjectId(userId),
   });
 
   if (!deletedPrescription) {
-    throw new Error("Prescription not found or access denied");
+    throw createServiceError("Prescription not found or access denied", 404);
   }
+
+  await ReminderModel.deleteMany({
+    prescriptionId: new Types.ObjectId(prescriptionId),
+  });
 
   return deletedPrescription;
 };
@@ -516,7 +575,7 @@ export const togglePrescriptionCurrentStatus = async (
   );
 
   if (!prescription) {
-    throw new Error("Prescription not found or access denied");
+    throw createServiceError("Prescription not found or access denied", 404);
   }
 
   // If archiving, deactivate reminders
@@ -922,7 +981,7 @@ export const completeTestService = async (
   });
 
   if (!prescription) {
-    throw new Error("Prescription not found or access denied");
+    throw createServiceError("Prescription not found or access denied", 404);
   }
 
   // Find test by _id in the array
@@ -931,7 +990,7 @@ export const completeTestService = async (
   );
 
   if (testIndex === -1) {
-    throw new Error("Test not found in this prescription");
+    throw createServiceError("Test not found in this prescription", 404);
   }
 
   // Update test properties
@@ -961,7 +1020,7 @@ export const getPrescriptionTestsService = async (
     .lean();
 
   if (!prescription) {
-    throw new Error("Prescription not found or access denied");
+    throw createServiceError("Prescription not found or access denied", 404);
   }
 
   return {
@@ -1012,25 +1071,26 @@ export const cancelTestService = async (
     userId: new Types.ObjectId(userId),
   });
 
-  // if (!prescription) {
-  //   throw new Error("Prescription not found or access denied");
-  // }
+  if (!prescription) {
+    throw createServiceError("Prescription not found or access denied", 404);
+  }
 
-  // const test = prescription.tests.id(testId);
+  const test = (prescription.tests as any).id(testId);
+  if (!test) {
+    throw createServiceError("Test not found in this prescription", 404);
+  }
+  if (test.status === "completed") {
+    throw createServiceError("A completed test cannot be cancelled", 400);
+  }
 
-  // if (!test) {
-  //   throw new Error("Test not found in this prescription");
-  // }
+  test.status = "cancelled";
+  test.notes = reason || "Cancelled by user";
+  await prescription.save();
 
-  // test.status = "cancelled";
-  // test.notes = reason || "Cancelled by user";
-
-  // await prescription.save();
-
-  // return {
-  //   prescriptionId: prescription._id,
-  //   test: test.toObject(),
-  // };
+  return {
+    prescriptionId: prescription._id,
+    test: test.toObject(),
+  };
 };
 
 export const areAllTestsCompletedService = async (
@@ -1095,7 +1155,7 @@ export const completePrescriptionService = async (
   });
 
   if (!prescription) {
-    throw new Error("Prescription not found or access denied");
+    throw createServiceError("Prescription not found or access denied", 404);
   }
 
   if (prescription.isComplete) {
@@ -1796,6 +1856,10 @@ export const getDetailedClinicalSummaryService = async (
     if (last > first + 0.5) trend = "improving";
     else if (last < first - 0.5) trend = "declining";
     else trend = "stable";
+  } else if (progressionData.length === 1) {
+    // Single feedback — use score to estimate
+    const score = progressionData[0].improvement;
+    trend = score >= 4 ? "improving" : score >= 3 ? "stable" : "declining";
   }
   
   // Side effects history
@@ -2001,14 +2065,24 @@ export const generateClinicalSummaryPDFService = async (
   });
 };
 export const generateAIClinicalNarrativeService = async (
-  userId: string
+  userId: string,
+  summaryData?: Awaited<ReturnType<typeof getDetailedClinicalSummaryService>>
 ): Promise<string> => {
-  // Get the detailed summary data
-  const summaryData = await getDetailedClinicalSummaryService(userId);
+  // Accept pre-fetched summary to avoid double DB call
+  if (!summaryData) {
+    summaryData = await getDetailedClinicalSummaryService(userId);
+  }
 
   // Create a prompt for Gemini to generate narrative clinical notes
   const prompt = `
-You are a medical professional writing detailed clinical notes. Based on the following patient data, write a comprehensive clinical summary in a professional medical narrative format.
+You are a medical scribe writing clinical notes strictly from provided data.
+CRITICAL RULES:
+- ONLY use information explicitly present in the data below
+- Do NOT infer, guess, or add any medical information not in the data
+- If a field is missing/null/empty, skip it — do not substitute or assume
+- Do NOT add diagnoses, medications, or symptoms not listed
+- Do NOT give medical advice or recommendations beyond what doctors already prescribed
+- Write in simple, clear language (not overly technical) so patients can understand
 
 **Patient Information:**
 - Name: ${summaryData.patientInfo.name}
@@ -2078,10 +2152,12 @@ Please write a detailed, professional clinical narrative summary (500-800 words)
 6. Provides clinical insights and potential recommendations for ongoing care
 
 Write in a professional medical tone suitable for clinical documentation. Use proper medical terminology and maintain HIPAA-compliant language.
+
+FORMAT: plain text only. Put each section title on its own line. Do NOT use markdown symbols such as #, *, **, or ---. Finish every sentence; keep the whole summary under 600 words.
 `;
 
   // Call Gemini API
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${appConfig.GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${appConfig.GEMINI_API_KEY}`;
 
   const payload = {
     contents: [
@@ -2094,10 +2170,11 @@ Write in a professional medical tone suitable for clinical documentation. Use pr
       },
     ],
     generationConfig: {
-      temperature: 0.7,
+      // Factual summary: low temperature. Large budget because the model's internal
+      // reasoning also counts against the limit (2048 truncated the visible text).
+      temperature: 0.2,
       topP: 0.95,
-      topK: 40,
-      maxOutputTokens: 2048,
+      maxOutputTokens: 8192,
     },
   };
 
@@ -2108,7 +2185,7 @@ Write in a professional medical tone suitable for clinical documentation. Use pr
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(60000),
     });
 
     if (!response.ok) {
@@ -2122,7 +2199,19 @@ Write in a professional medical tone suitable for clinical documentation. Use pr
       throw new Error("Invalid response from Gemini API");
     }
 
-    const narrativeText = data.candidates[0].content.parts[0].text;
+    const parts: any[] = data.candidates[0].content?.parts || [];
+    const narrativeText = parts
+      .filter((p) => !p.thought && typeof p.text === "string")
+      .map((p) => p.text)
+      .join("")
+      .trim();
+
+    if (!narrativeText) {
+      throw new Error("Gemini returned an empty narrative");
+    }
+    if (data.candidates[0].finishReason === "MAX_TOKENS") {
+      console.warn("⚠️ Clinical narrative hit the token limit and may be cut off");
+    }
 
     return narrativeText;
   } catch (error) {

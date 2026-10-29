@@ -21,6 +21,9 @@ export interface IReminderDocument extends Document {
   startDate: Date;
   endDate?: Date | null;
   lastNotifiedAt?: Date | null;
+  refillDate?: Date | null;
+  refillReminderSent: boolean;
+  totalDays?: number | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -73,6 +76,9 @@ const ReminderSchema = new Schema<IReminderDocument>(
       type: Date,
       default: null,
     },
+    refillDate: { type: Date, default: null },
+    refillReminderSent: { type: Boolean, default: false },
+    totalDays: { type: Number, default: null },
   },
   {
     timestamps: true,

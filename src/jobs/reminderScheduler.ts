@@ -1,6 +1,7 @@
 // src/jobs/reminderScheduler.ts
 import { getDueRemindersService } from "../services/prescription.service";
 import { ReminderModel } from "../models/reminder.model";
+import { User } from "../models/user.model";
 import { sendMedicationReminder, MedicationNotification } from "../services/notification.service";
 import { getUserFCMTokens, deactivateFCMToken, cleanupInactiveTokens } from "../services/fcm.service";
 
@@ -24,12 +25,15 @@ const sendNotification = async (
       return;
     }
 
+    const owner = await User.findById(userId).select("language voiceReminders");
     const notification: MedicationNotification = {
       userId,
       medicineName,
       dosage,
       timeSlot,
       prescriptionId,
+      language: owner?.language === "bn" ? "bn" : "en",
+      voice: !!owner?.voiceReminders,
     };
 
     let sentCount = 0;

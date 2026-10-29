@@ -36,6 +36,7 @@ export interface IMedicine {
 
 export interface IPrescriptionDocument extends Document {
   userId: Types.ObjectId;
+  familyMemberId?: Types.ObjectId | null;
   doctor: IDoctorInfo;
   patient: IPatientInfo;
   symptoms: string[];
@@ -44,6 +45,7 @@ export interface IPrescriptionDocument extends Document {
   medicines: IMedicine[];
   notes?: string | null;
   ocrText: string;
+  imageUrl?: string | null;
   isCurrent: boolean;
   isComplete: boolean;
   completedAt?: Date | null;
@@ -118,6 +120,12 @@ const PrescriptionSchema = new Schema<IPrescriptionDocument>(
       required: true,
       index: true,
     },
+    familyMemberId: {
+      type: Schema.Types.ObjectId,
+      ref: "FamilyMember",
+      default: null,
+      index: true,
+    },
 
     // Doctor Information
     doctor: { type: DoctorInfoSchema, required: true },
@@ -140,6 +148,7 @@ const PrescriptionSchema = new Schema<IPrescriptionDocument>(
 
     // OCR Data
     ocrText: { type: String, required: true },
+    imageUrl: { type: String, default: null },
 
     // Current Status
     isCurrent: {

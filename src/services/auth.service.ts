@@ -2,24 +2,44 @@ import { MESSAGES } from "../lib/constants";
 import { signToken } from "../lib/jwt";
 import { comparePassword, hashPassword } from "../lib/password";
 import { IUser, User } from "../models/user.model";
-import { sendOTP, verifyOTP } from "./otp.service";
+import { currencyForCountry, languageForCountry } from "../lib/currency";
+import { sendEmailOTP, sendOTP, verifyEmailOTP, verifyOTP } from "./otp.service";
+
+export const requestEmailOtpService = async (email: string): Promise<void> => {
+  const existingUser = await User.findOne({ email });
+  if (existingUser) {
+    throw new Error(MESSAGES.USER_EXISTS);
+  }
+  await sendEmailOTP(email);
+};
 
 export const signupWithEmailService = async (
   email: string,
   password: string,
-  fullName: string
+  fullName: string,
+  code: string,
+  country?: string
 ): Promise<{ user: IUser; token: string }> => {
   const existingUser = await User.findOne({ email });
   if (existingUser) {
     throw new Error(MESSAGES.USER_EXISTS);
   }
 
+  const isValid = await verifyEmailOTP(email, code);
+  if (!isValid) {
+    throw new Error(MESSAGES.INVALID_OTP);
+  }
+
+  const countryCode = (country || "BD").toUpperCase();
   const hashedPassword = await hashPassword(password);
   const user = await User.create({
     email,
     password: hashedPassword,
     fullName,
     isVerified: true,
+    country: countryCode,
+    currency: currencyForCountry(countryCode).currency,
+    language: languageForCountry(countryCode),
   });
 
   const token = signToken({ id: user._id });

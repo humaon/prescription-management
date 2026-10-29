@@ -21,9 +21,15 @@ export async function authenticate(
     return;
   }
 
-  const decoded = verifyToken(token) as { id: string };
-  if (!decoded) {
-    res.status(403).json({ error: "Invalid token" });
+  let decoded: { id: string } | undefined;
+  try {
+    decoded = verifyToken(token) as { id: string };
+  } catch {
+    res.status(401).json({ error: "Session expired. Please sign in again." });
+    return;
+  }
+  if (!decoded?.id) {
+    res.status(401).json({ error: "Invalid token" });
     return;
   }
 

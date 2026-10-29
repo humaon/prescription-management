@@ -11,11 +11,21 @@ import userRoutes from "./routes/user.route";
 import prescriptionRoutes from "./routes/prescription.route";
 import fcmRoutes from "./routes/fcm.route";
 import testNotificationRoutes from "./routes/notificationTest.route";
+import featuresRoutes from "./routes/features.route";
+import extrasRoutes from "./routes/extras.route";
+import { cronAuth } from "./middleware/cronAuth.middleware";
+import helmet from "helmet";
+import { apiLimiter } from "./middleware/rateLimit.middleware";
 import { runRemindersForTimeSlot, runCleanupJobs } from "./jobs/reminderScheduler";
 
 const app = express();
 
+// Behind a platform proxy (Cloud Run / Render / Railway) the real client IP is in X-Forwarded-For
+app.set("trust proxy", 1);
+
 // Middleware
+app.use(helmet());
+app.use(apiLimiter);
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -30,12 +40,21 @@ app.get(`${appConfig.BASE_PATH}/health`, (_req, res) => {
   res.json({ status: "OK", timestamp: new Date().toISOString() });
 });
 
+// Cron endpoints are protected by CRON_SECRET (registered before the routes below)
+app.use("/cron", cronAuth);
+app.use(`${appConfig.BASE_PATH}/cron`, cronAuth);
+
 // Routes
 app.use(`/auth`, authRoutes);
 app.use(`${appConfig.BASE_PATH}/users`, userRoutes);
 app.use(`${appConfig.BASE_PATH}/prescriptions`, prescriptionRoutes);
 app.use(`${appConfig.BASE_PATH}/fcm`, fcmRoutes);
-app.use("/test", testNotificationRoutes);
+// Push-test helpers let anyone send notifications, so they exist only outside production
+if (appConfig.NODE_ENV !== "production") {
+  app.use("/test", testNotificationRoutes);
+}
+app.use(`${appConfig.BASE_PATH}`, featuresRoutes);
+app.use(`${appConfig.BASE_PATH}`, extrasRoutes);
 
 // Cloud Scheduler endpoints - Morning reminders (8:00 AM)
 app.post("/cron/reminders/morning", async (_req, res) => {

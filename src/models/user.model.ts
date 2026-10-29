@@ -18,6 +18,14 @@ export interface IUser extends Document {
   googleId?: string;
   isVerified: boolean;
   isActive: boolean;
+  country?: string;
+  currency?: string;
+  language: "en" | "bn";
+  voiceReminders: boolean;
+  bloodGroup?: string | null;
+  allergies: string[];
+  chronicConditions: string[];
+  emergencyContacts: { name: string; phone: string; relation?: string }[];
   deviceTokens: IDeviceToken[]; // NEW
   notificationSettings: {        // NEW
     enabled: boolean;
@@ -69,7 +77,23 @@ const userSchema = new Schema<IUser>(
     googleId: { type: String, unique: true, sparse: true },
     isVerified: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true },
-    
+    country: { type: String, default: "BD" },
+    currency: { type: String, default: "BDT" },
+    language: { type: String, enum: ["en", "bn"], default: "bn" },
+    voiceReminders: { type: Boolean, default: false },
+    bloodGroup: { type: String, default: null },
+    allergies: { type: [String], default: [] },
+    chronicConditions: { type: [String], default: [] },
+    emergencyContacts: {
+      type: [
+        new Schema(
+          { name: String, phone: String, relation: String },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
+
     deviceTokens: {
       type: [DeviceTokenSchema],
       default: [],

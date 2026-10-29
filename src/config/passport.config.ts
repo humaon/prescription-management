@@ -26,39 +26,43 @@ const localStrategy = new LocalStrategy(
   }
 );
 
-const googleStrategy = new GoogleStrategy(
-  {
-    clientID: appConfig.GOOGLE_CLIENT_ID,
-    clientSecret: appConfig.GOOGLE_CLIENT_SECRET,
-    callbackURL: appConfig.GOOGLE_CALLBACK_URL,
-  },
-  async (_accessToken, _refreshToken, profile, done) => {
-    try {
-      let user = await User.findOne({ googleId: profile.id });
-
-      if (!user) {
-        const randomPassword = Math.random().toString(36);
-        const hashedPassword = await hashPassword(randomPassword);
-
-        user = await User.create({
-          googleId: profile.id,
-          fullName: profile.displayName,
-          email: profile.emails?.[0]?.value,
-          password: hashedPassword,
-          isVerified: true,
-        });
-      }
-
-      return done(null, user);
-    } catch (err) {
-      return done(err);
-    }
-  }
-);
-
 export const setupPassport = (): void => {
   passport.use("local", localStrategy);
-  passport.use(googleStrategy);
+
+  if (appConfig.GOOGLE_CLIENT_ID && appConfig.GOOGLE_CLIENT_SECRET && appConfig.GOOGLE_CALLBACK_URL) {
+    const googleStrategy = new GoogleStrategy(
+      {
+        clientID: appConfig.GOOGLE_CLIENT_ID,
+        clientSecret: appConfig.GOOGLE_CLIENT_SECRET,
+        callbackURL: appConfig.GOOGLE_CALLBACK_URL,
+      },
+      async (_accessToken, _refreshToken, profile, done) => {
+        try {
+          let user = await User.findOne({ googleId: profile.id });
+
+          if (!user) {
+            const randomPassword = Math.random().toString(36);
+            const hashedPassword = await hashPassword(randomPassword);
+
+            user = await User.create({
+              googleId: profile.id,
+              fullName: profile.displayName,
+              email: profile.emails?.[0]?.value,
+              password: hashedPassword,
+              isVerified: true,
+            });
+          }
+
+          return done(null, user);
+        } catch (err) {
+          return done(err);
+        }
+      }
+    );
+    passport.use(googleStrategy);
+  } else {
+    console.warn("⚠️  Google OAuth not configured — Google login disabled");
+  }
 
   passport.serializeUser((user: any, done) => {
     done(null, user.id);
