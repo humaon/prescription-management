@@ -1,8 +1,19 @@
 import { Request, Response } from "express";
 import fs from "fs/promises";
 import mongoose from "mongoose";
+<<<<<<< HEAD
 import { uploadToStorage } from "../lib/storage";
 import { withAiQuota } from "../services/aiQuota.service";
+=======
+import { extractTextFromImage } from "../lib/ocr";
+import { openReport, saveReport } from "../lib/reportStorage";
+import { LabReport, readLabReport } from "../lib/reportReader";
+import {
+  createShareLinkService,
+  listShareLinksService,
+  revokeShareLinkService,
+} from "../services/share.service";
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 import { createServiceError, createSuccessResponse } from "../lib/utils";
 import {
   prescriptionParseFromImageService,
@@ -15,11 +26,18 @@ import {
   prescriptionDeleteByIdService,
   togglePrescriptionCurrentStatus,
   getUserRemindersService,
+  getReminderScheduleService,
+  getAdherenceService,
+  checkMedicinesService,
+  setReminderStockService,
+  getUpcomingFollowUpsService,
+  setDoseTakenService,
   getPrescriptionStatsService,
    getHealthInsightsService,
    getPrescriptionDetailsService,
    getPendingTestsService,
    completeTestService,
+   getTestReportService,
    getCompletedTestsService,
    getPrescriptionTestsService,
    getClinicalSummaryService,
@@ -30,7 +48,7 @@ import {
    getTestStatsService,
    getDetailedClinicalSummaryService,
    generateClinicalSummaryPDFService,
-   generateAIClinicalNarrativeService
+   getClinicalNarrativeService,
 } from "../services/prescription.service";
 
 // Step 1: Upload and parse (returns data for user to review/edit)
@@ -38,21 +56,30 @@ export const prescriptionUploadController = async (
   req: Request,
   res: Response
 ) => {
-  if (!req.file) {
+  const files = (Array.isArray(req.files) ? req.files : req.file ? [req.file] : []) as Express.Multer.File[];
+  const cleanup = () => Promise.all(files.map((f) => fs.unlink(f.path).catch(() => {})));
+
+  if (files.length === 0) {
     throw createServiceError("No image file uploaded", 400);
   }
 
   if (!req.userId) {
+    await cleanup();
     throw createServiceError("User not authenticated", 401);
   }
 
-  const imagePath = req.file.path;
-
   try {
+<<<<<<< HEAD
     // One Gemini call: read the photo and parse it (counts against the daily free scan limit)
     const { parsed, ocrText } = await withAiQuota(req.userId, "scan", () =>
       prescriptionParseFromImageService(imagePath)
     );
+=======
+    // Every page (image or PDF) is read in parallel, then parsed as one prescription
+    const pages = await Promise.all(files.map((f) => extractTextFromImage(f.path, f.mimetype)));
+    const extractedText =
+      pages.length === 1 ? pages[0] : pages.map((t, i) => `--- Page ${i + 1} ---\n${t}`).join("\n\n");
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
     // Keep the original photo (Cloudinary). Best-effort: the AI read already succeeded,
     // so a storage hiccup must not throw the result away.
@@ -63,8 +90,12 @@ export const prescriptionUploadController = async (
       console.warn("⚠️ Prescription image storage failed, continuing without it:", e);
     }
 
+<<<<<<< HEAD
     // Clean up local temp file
     await fs.unlink(imagePath);
+=======
+    await cleanup();
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
     // Return parsed data for user to review/edit
     res.status(200).json(
@@ -78,8 +109,7 @@ export const prescriptionUploadController = async (
       )
     );
   } catch (error) {
-    // Clean up file on error
-    await fs.unlink(imagePath).catch(() => {});
+    await cleanup();
     throw error;
   }
 };
@@ -430,35 +460,72 @@ export const completeTestController = async (req: Request, res: Response) => {
     throw createServiceError("Test report file is required", 400);
   }
 
-  if (!mongoose.Types.ObjectId.isValid(prescriptionId)) {
-    throw createServiceError("Invalid prescription ID", 400);
+  if (
+    !mongoose.Types.ObjectId.isValid(prescriptionId) ||
+    !mongoose.Types.ObjectId.isValid(testId)
+  ) {
+    await fs.unlink(req.file.path).catch(() => {});
+    throw createServiceError("Invalid prescription or test ID", 400);
   }
 
-  if (!mongoose.Types.ObjectId.isValid(testId)) {
-    throw createServiceError("Invalid test ID", 400);
+  // Best effort: the test is completed even if the report can't be read
+  let report: LabReport | null = null;
+  try {
+    report = await readLabReport(req.file.path, req.file.mimetype);
+  } catch (error) {
+    console.error("❌ Lab report read failed:", error);
   }
 
+<<<<<<< HEAD
   // Upload test report to Cloudinary
   const reportUrl = await uploadToStorage(req.file.path, "test-reports");
 
   // Clean up local temp file
   await fs.unlink(req.file.path).catch(() => {});
+=======
+  const reportKey = await saveReport(req.file.path, req.file.mimetype, req.userId);
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
-  const result = await completeTestService(
-    prescriptionId,
-    testId,
-    req.userId,
-    {
-      reportUrl: reportUrl, // Store relative path or full URL
-      resultSummary,
-      notes,
-    }
-  );
+  const result = await completeTestService(prescriptionId, testId, req.userId, {
+    reportKey,
+    reportMimeType: req.file.mimetype,
+    resultSummary,
+    notes,
+    results: report?.results ?? [],
+    aiSummary: report?.summary ?? null,
+  });
 
   res
     .status(200)
     .json(createSuccessResponse(result, "Test marked as completed"));
-};;
+};
+
+// Stream a test report to its owner (reports are never served publicly)
+export const getTestReportController = async (req: Request, res: Response) => {
+  if (!req.userId) {
+    throw createServiceError("User not authenticated", 401);
+  }
+  const { prescriptionId, testId } = req.params;
+  if (
+    !mongoose.Types.ObjectId.isValid(prescriptionId) ||
+    !mongoose.Types.ObjectId.isValid(testId)
+  ) {
+    throw createServiceError("Invalid prescription or test ID", 400);
+  }
+
+  const { key, mimeType } = await getTestReportService(prescriptionId, testId, req.userId);
+  const stream = openReport(key);
+  if (!stream) {
+    throw createServiceError("Report file is no longer available", 404);
+  }
+  res.setHeader("Content-Type", mimeType || "application/octet-stream");
+  res.setHeader("Cache-Control", "private, no-store");
+  stream.on("error", () => {
+    if (!res.headersSent) res.status(404);
+    res.end();
+  });
+  stream.pipe(res);
+};
 
 // Get all tests for a specific prescription
 export const getPrescriptionTestsController = async (
@@ -685,6 +752,7 @@ export const getClinicalSummaryController = async (
   }
 
   const summary = await getDetailedClinicalSummaryService(req.userId);
+<<<<<<< HEAD
 
   // The AI narrative is a bonus: if the daily free limit is hit, still return the summary data
   let narrative: string | null = null;
@@ -695,6 +763,9 @@ export const getClinicalSummaryController = async (
   } catch (e: any) {
     if (e?.statusCode !== 429 && e?.statusCode !== 503) throw e;
   }
+=======
+  const narrative = await getClinicalNarrativeService(req.userId, summary);
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
   res
     .status(200)
@@ -733,4 +804,127 @@ export const downloadClinicalSummaryPDFController = async (
   } catch (error) {
     throw error;
   }
+};
+// Mark / unmark one of today's doses as taken
+export const setDoseTakenController = async (req: Request, res: Response) => {
+  if (!req.userId) {
+    throw createServiceError("User not authenticated", 401);
+  }
+  const { slot } = req.body;
+  if (!["morning", "noon", "night"].includes(slot)) {
+    throw createServiceError("slot must be morning, noon or night", 400);
+  }
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw createServiceError("Invalid reminder ID", 400);
+  }
+
+  const result = await setDoseTakenService(
+    req.userId,
+    req.params.id,
+    slot,
+    req.method === "POST"
+  );
+  res.status(200).json(createSuccessResponse(result, "Dose updated"));
+};
+
+
+// All active reminders + dose times, for the phone's local alarms
+export const getReminderScheduleController = async (req: Request, res: Response) => {
+  if (!req.userId) {
+    throw createServiceError("User not authenticated", 401);
+  }
+  const schedule = await getReminderScheduleService(req.userId);
+  res.status(200).json(createSuccessResponse(schedule, "Reminder schedule retrieved"));
+};
+
+// Warn before saving: medicines repeating ones already being taken
+// body: { medicines: [...], excludePrescriptionId?: string }
+export const checkMedicinesController = async (req: Request, res: Response) => {
+  if (!req.userId) {
+    throw createServiceError("User not authenticated", 401);
+  }
+  const { medicines, excludePrescriptionId, allergies } = req.body ?? {};
+  if (!Array.isArray(medicines)) {
+    throw createServiceError("medicines must be an array", 400);
+  }
+  const warnings = await checkMedicinesService(
+    req.userId,
+    medicines.slice(0, 50),
+    excludePrescriptionId,
+    Array.isArray(allergies) ? allergies : []
+  );
+  res.status(200).json(createSuccessResponse({ warnings }, `${warnings.length} warning(s)`));
+};
+
+// Doses taken vs due; ?days=1..90 (default 7)
+export const getAdherenceController = async (req: Request, res: Response) => {
+  if (!req.userId) {
+    throw createServiceError("User not authenticated", 401);
+  }
+  const days = Math.min(Math.max(parseInt(String(req.query.days ?? "7"), 10) || 7, 1), 90);
+  const adherence = await getAdherenceService(req.userId, days);
+  res.status(200).json(createSuccessResponse(adherence, "Adherence retrieved"));
+};
+
+// body: { count: number | null } — units on hand (null stops tracking)
+export const setReminderStockController = async (req: Request, res: Response) => {
+  if (!req.userId) {
+    throw createServiceError("User not authenticated", 401);
+  }
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw createServiceError("Invalid reminder ID", 400);
+  }
+  const { count } = req.body ?? {};
+  if (count !== null && (typeof count !== "number" || !isFinite(count) || count < 0 || count > 10000)) {
+    throw createServiceError("count must be a number from 0 to 10000, or null", 400);
+  }
+  const result = await setReminderStockService(req.userId, req.params.id, count);
+  res.status(200).json(createSuccessResponse(result, "Stock updated"));
+};
+
+// ---------- Doctor share links ----------
+const publicBaseUrl = (req: Request) =>
+  (process.env.PUBLIC_BASE_URL || `${req.get("x-forwarded-proto") || req.protocol}://${req.get("host")}`).replace(/\/$/, "");
+
+// body: { days?: 1..30 } (default 7)
+export const createShareLinkController = async (req: Request, res: Response) => {
+  if (!req.userId) {
+    throw createServiceError("User not authenticated", 401);
+  }
+  const days = Math.min(Math.max(parseInt(String(req.body?.days ?? "7"), 10) || 7, 1), 30);
+  const link = await createShareLinkService(req.userId, req.profileId ?? null, days);
+  res.status(201).json(
+    createSuccessResponse(
+      { id: link.id, url: `${publicBaseUrl(req)}/share/${link.token}`, expiresAt: link.expiresAt },
+      "Share link created"
+    )
+  );
+};
+
+export const listShareLinksController = async (req: Request, res: Response) => {
+  if (!req.userId) {
+    throw createServiceError("User not authenticated", 401);
+  }
+  const links = await listShareLinksService(req.userId, req.profileId ?? null);
+  res.status(200).json(createSuccessResponse(links, "Active share links"));
+};
+
+export const revokeShareLinkController = async (req: Request, res: Response) => {
+  if (!req.userId) {
+    throw createServiceError("User not authenticated", 401);
+  }
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw createServiceError("Invalid share link ID", 400);
+  }
+  await revokeShareLinkService(req.userId, req.params.id);
+  res.status(200).json(createSuccessResponse(null, "Share link stopped"));
+};
+
+// Upcoming follow-up visits (date >= today), soonest first
+export const getUpcomingFollowUpsController = async (req: Request, res: Response) => {
+  if (!req.userId) {
+    throw createServiceError("User not authenticated", 401);
+  }
+  const followUps = await getUpcomingFollowUpsService(req.userId);
+  res.status(200).json(createSuccessResponse(followUps, "Upcoming follow-ups retrieved"));
 };

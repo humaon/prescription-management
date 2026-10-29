@@ -131,3 +131,133 @@ export const sendMedicationReminder = async (
     throw error;
   }
 };
+
+export interface FollowUpNotification {
+  userId: string | Types.ObjectId;
+  prescriptionId: string | Types.ObjectId;
+  doctorName: string | null;
+  date: string; // YYYY-MM-DD
+  note: string | null;
+  when: "tomorrow" | "today";
+  // Tests from that prescription: still to do, or reports to bring
+  pendingTests?: string[];
+  hasReports?: boolean;
+}
+
+const sendSimple = async (
+  fcmToken: string,
+  title: string,
+  body: string,
+  data: Record<string, string>,
+  tag: string
+) => {
+  if (!firebaseInitialized) {
+    throw new Error("Firebase not initialized");
+  }
+  try {
+    await admin.messaging().send({
+      token: fcmToken,
+      notification: { title, body },
+      data: { ...data, timestamp: new Date().toISOString() },
+      android: { priority: "high", notification: { icon: "ic_medication", color: "#4CAF50", tag } },
+      apns: {
+        headers: { "apns-priority": "10", "apns-push-type": "alert" },
+        payload: { aps: { alert: { title, body }, sound: "default" } },
+      },
+    });
+  } catch (error: any) {
+    if (
+      error.code === "messaging/invalid-registration-token" ||
+      error.code === "messaging/registration-token-not-registered"
+    ) {
+      throw new Error("INVALID_TOKEN");
+    }
+    throw error;
+  }
+};
+
+// "Tests still pending" nudge, one per prescription
+export const sendPendingTestsReminder = (
+  fcmToken: string,
+  n: { userId: string; prescriptionId: string; testNames: string[]; doctorName: string | null; days: number }
+) =>
+  sendSimple(
+    fcmToken,
+    `🧪 ${n.testNames.length === 1 ? "A test is" : `${n.testNames.length} tests are`} still pending`,
+    [
+      n.testNames.join(", "),
+      n.doctorName ? `prescribed by ${n.doctorName} ${n.days} days ago` : `prescribed ${n.days} days ago`,
+    ].join(" · "),
+    { type: "pending_tests_reminder", prescriptionId: n.prescriptionId, userId: n.userId },
+    `tests_${n.prescriptionId}`
+  );
+
+// A tracked medicine is about to run out
+export const sendRefillReminder = (
+  fcmToken: string,
+  n: { userId: string; reminderId: string; medicineName: string; stockCount: number; daysLeft: number }
+) =>
+  sendSimple(
+    fcmToken,
+    `💊 ${n.medicineName} is running low`,
+    n.daysLeft <= 0
+      ? `Only ${n.stockCount} left — less than a day. Buy more today.`
+      : `${n.stockCount} left — about ${n.daysLeft} day${n.daysLeft === 1 ? "" : "s"}. Time to buy more.`,
+    { type: "refill_reminder", reminderId: n.reminderId, userId: n.userId },
+    `refill_${n.reminderId}`
+  );
+
+// Reminder the day before, and on the day of, a follow-up visit
+export const sendFollowUpReminder = async (
+  fcmToken: string,
+  notification: FollowUpNotification,
+): Promise<void> => {
+  if (!firebaseInitialized) {
+    throw new Error("Firebase not initialized");
+  }
+
+  const title = `📅 Doctor visit ${notification.when}`;
+  const body = [
+    notification.doctorName ? `Follow-up with ${notification.doctorName}` : "Follow-up visit",
+    notification.note,
+    notification.pendingTests?.length
+      ? `Tests not done yet: ${notification.pendingTests.join(", ")}`
+      : notification.hasReports
+        ? "Take your test reports"
+        : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const message: admin.messaging.Message = {
+    token: fcmToken,
+    notification: { title, body },
+    data: {
+      type: "follow_up_reminder",
+      prescriptionId: notification.prescriptionId.toString(),
+      userId: notification.userId.toString(),
+      date: notification.date,
+      timestamp: new Date().toISOString(),
+    },
+    android: {
+      priority: "high",
+      notification: { icon: "ic_medication", color: "#4CAF50", tag: `followup_${notification.prescriptionId}` },
+    },
+    apns: {
+      headers: { "apns-priority": "10", "apns-push-type": "alert" },
+      payload: { aps: { alert: { title, body }, sound: "default" } },
+    },
+  };
+
+  try {
+    await admin.messaging().send(message);
+  } catch (error: any) {
+    if (
+      error.code === "messaging/invalid-registration-token" ||
+      error.code === "messaging/registration-token-not-registered"
+    ) {
+      throw new Error("INVALID_TOKEN");
+    }
+    throw error;
+  }
+};

@@ -7,6 +7,7 @@ import {
   signupMobileRequestService,
   signupMobileVerifyService,
   signupWithEmailService,
+  deleteAccountService,
 } from "../services/auth.service";
 
 export const requestEmailOtpController = async (req: Request, res: Response) => {
@@ -146,3 +147,12 @@ export async function googleCallbackController(req: Request, res: Response) {
     res.status(500).json({ error: err.message });
   }
 }
+
+export const deleteAccountController = async (req: Request, res: Response) => {
+  try {
+    await deleteAccountService(req.userId as string);
+    res.status(200).json({ message: "Account and all associated data deleted" });
+  } catch (err: any) {
+    res.status(err.message === "User not found" ? 404 : 500).json({ error: err.message });
+  }
+};

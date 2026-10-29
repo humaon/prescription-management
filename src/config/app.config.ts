@@ -9,10 +9,17 @@ export const appConfig = (() => ({
   PORT: getEnv("PORT", "8080"),
   BASE_PATH: getEnv("BASE_PATH", "/api"),
   GEMINI_API_KEY: getEnv("GEMINI_API_KEY"),
+  GEMINI_MODEL: getEnv("GEMINI_MODEL", "gemini-2.5-flash"),
+  CRON_SECRET: process.env.CRON_SECRET || "",
+  // Day boundaries for "today's doses" are computed in this timezone
+  APP_TIMEZONE: getEnv("APP_TIMEZONE", "Asia/Dhaka"),
 
   // Upload
   UPLOAD_DIR: getEnv("UPLOAD_DIR", "uploads"),
   MAX_FILE_SIZE: 10 * 1024 * 1024, // 10MB
+  // Firebase/Cloud Storage bucket for test reports; empty = local UPLOAD_DIR
+  // (Cloud Run's disk is wiped on restart, so set this in production)
+  REPORTS_BUCKET: process.env.REPORTS_BUCKET || "",
 
   // JWT
   JWT_SECRET: getEnv("JWT_SECRET"),

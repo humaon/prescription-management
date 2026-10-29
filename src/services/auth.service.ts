@@ -103,3 +103,32 @@ export const loginService = async (
 
   return { user, token };
 };
+
+// Permanently delete a user's account and all associated data (Play Store requirement)
+export const deleteAccountService = async (userId: string) => {
+  const user = await User.findById(userId);
+  if (!user) {
+    throw new Error("User not found");
+  }
+
+  const prescriptions = await PrescriptionModel.find({ userId: user._id }, { tests: 1 });
+
+  // Remove uploaded test report files from disk
+  const reportFiles = prescriptions
+    .flatMap((p) => p.tests || [])
+    .map((t) => t.reportUrl)
+    .filter((url): url is string => !!url && url.includes("/uploads/"))
+    .map((url) => path.join(process.cwd(), appConfig.UPLOAD_DIR, path.basename(url)));
+  await Promise.all(reportFiles.map((file) => fs.unlink(file).catch(() => undefined)));
+
+  await Promise.all([
+    PrescriptionFeedbackModel.deleteMany({ userId: user._id }),
+    ReminderModel.deleteMany({ userId: user._id }),
+    DoseLogModel.deleteMany({ userId: user._id }),
+    PrescriptionModel.deleteMany({ userId: user._id }),
+    user.mobileNumber ? OTP.deleteMany({ mobileNumber: user.mobileNumber }) : Promise.resolve(),
+  ]);
+
+  // User document also holds device FCM tokens
+  await User.deleteOne({ _id: user._id });
+};

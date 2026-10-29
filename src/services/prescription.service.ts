@@ -10,13 +10,37 @@ import {
   PrescriptionModel,
 } from "../models/prescription.model";
 import {
+  NormalizedMedicine,
   ParsedPrescription,
+  normalizeFollowUp,
+  normalizeMedicine,
+  normalizeParsedPrescription,
+  normalizePrescriptionDate,
   validatePrescriptionParsedData,
 } from "../validation/prescription.validation";
 import { ReminderModel } from "../models/reminder.model";
-import { parseDosageSchedule } from "../lib/dosageParser";
+import { DEFAULT_REMINDER_TIMES, User } from "../models/user.model";
+import { DoseLogModel, DoseSlot } from "../models/doseLog.model";
+import { createServiceError } from "../lib/utils";
+import { deleteReport } from "../lib/reportStorage";
+import { normalizeVitals } from "../lib/vitals";
+import { allergyClash, cleanAllergies, mergeAllergies } from "../lib/allergies";
+import { LabResult } from "../lib/reportReader";
+import {
+  addDaysYmd,
+  endOfDayInAppTz,
+  startOfDayInAppTz,
+  weekdayInAppTz,
+  weekdayOfYmd,
+  ymdInAppTz,
+} from "../lib/appDate";
 import { PrescriptionFeedbackModel } from "../models/PrescriptionFeedback.model";
 import PDFDocument from 'pdfkit';
+import fs from "fs";
+import path from "path";
+import crypto from "crypto";
+import { ClinicalNarrativeModel } from "../models/clinicalNarrative.model";
+import { currentProfileId, profileFilter } from "../lib/requestScope";
 
 
 // Validate and normalize the JSON Gemini returned for a prescription
@@ -83,24 +107,6 @@ Also add one more top-level key "ocrText": a faithful plain-text transcription o
 
 // Parse prescription text using Gemini API
 
-const normalizeBanglaDosage = (dosage: string): string => {
-  if (!dosage || typeof dosage !== "string") {
-    return dosage;
-  }
-
-  const banglaToEnglish: { [key: string]: string } = {
-    '০': '0',
-    '১': '1',
-  };
-
-  let result = dosage;
-  Object.entries(banglaToEnglish).forEach(([bangla, english]) => {
-    result = result.replace(new RegExp(bangla, 'g'), english);
-  });
-
-  return result;
-};
-
 // Parse prescription text using Gemini API
 export const prescriptionParseService = async (
   text: string
@@ -123,10 +129,11 @@ export const prescriptionParseService = async (
       },
     ],
     generationConfig: {
-      temperature: 0.1,
+      responseMimeType: "application/json",
+      temperature: 0,
       topP: 0.95,
       topK: 40,
-      maxOutputTokens: 2048,
+      maxOutputTokens: 8192,
     },
   };
 
@@ -137,7 +144,7 @@ export const prescriptionParseService = async (
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(60000),
     });
 
     if (!response.ok) {
@@ -188,7 +195,16 @@ export const prescriptionParseService = async (
       );
     }
 
+<<<<<<< HEAD
     return finalizeParsedPrescription(parsedData);
+=======
+    if (!validatePrescriptionParsedData(parsedData)) {
+      throw new Error("Parsed data does not match required schema");
+    }
+
+    // Coerce the structured fields; derive any the model omitted from the text
+    return normalizeParsedPrescription(parsedData, text);
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
   } catch (error) {
     if (error instanceof Error) {
       throw new Error(`Prescription parsing failed: ${error.message}`);
@@ -307,48 +323,136 @@ export const prescriptionParseService = async (
 //   }
 // };
 
-// Helper: Calculate end date from duration string
-const calculateEndDate = (duration: string): Date | null => {
-  const daysMatch = duration.match(/(\d+)\s*days?/i);
-  if (daysMatch) {
-    const days = parseInt(daysMatch[1]);
-    const endDate = new Date();
-    endDate.setDate(endDate.getDate() + days);
-    return endDate;
-  }
+// End of the last day of a `days`-day course whose first day is startYmd
+// ("5 days" from Monday → end of Friday)
+const endDateForDays = (startYmd: string, days: number): Date =>
+  endOfDayInAppTz(addDaysYmd(startYmd, days - 1));
 
-  const weeksMatch = duration.match(/(\d+)\s*weeks?/i);
-  if (weeksMatch) {
-    const weeks = parseInt(weeksMatch[1]);
-    const endDate = new Date();
-    endDate.setDate(endDate.getDate() + weeks * 7);
-    return endDate;
-  }
+// Day the course starts: the prescription date, else the upload day
+const courseStartYmd = (p: { prescriptionDate?: string | null; uploadedAt?: Date }) =>
+  p.prescriptionDate || ymdInAppTz(p.uploadedAt ?? new Date());
 
-  const monthsMatch = duration.match(/(\d+)\s*months?/i);
-  if (monthsMatch) {
-    const months = parseInt(monthsMatch[1]);
-    const endDate = new Date();
-    endDate.setMonth(endDate.getMonth() + months);
-    return endDate;
-  }
+// Fields a client may set when saving / editing a prescription
+const EDITABLE_FIELDS = [
+  "doctor",
+  "patient",
+  "symptoms",
+  "diagnosis",
+  "tests",
+  "medicines",
+  "notes",
+  "followUp",
+  "prescriptionDate",
+  "vitals",
+  "allergies",
+] as const;
 
-  return null;
+// Allergies written on a prescription join that person's allergy list
+// (the family member's, or the account holder's)
+const rememberAllergies = async (
+  userId: string,
+  allergies: string[] | undefined,
+  profileId: Types.ObjectId | null | undefined
+) => {
+  if (!allergies?.length) return;
+  const user = await User.findById(userId).select("allergies profiles");
+  if (!user) return;
+  const profile = profileId ? user.profiles.find((p) => p._id.equals(profileId)) : null;
+  if (profile) profile.allergies = mergeAllergies(profile.allergies ?? [], allergies);
+  else if (!profileId) user.allergies = mergeAllergies(user.allergies ?? [], allergies);
+  await user.save();
 };
 
-// Helper: Create reminders for medicines
+// Allergies of the active person (family member or account holder)
+const allergiesOf = async (userId: string): Promise<string[]> => {
+  const profileId = currentProfileId();
+  const user = await User.findById(userId).select("allergies profiles").lean();
+  if (!profileId) return user?.allergies ?? [];
+  return user?.profiles?.find((p) => p._id.equals(profileId))?.allergies ?? [];
+};
+
+const pickEditable = (data: any) => {
+  const out: Record<string, any> = {};
+  for (const key of EDITABLE_FIELDS) if (key in (data ?? {})) out[key] = data[key];
+  // Numbers are always re-derived from the written values
+  if ("vitals" in out) out.vitals = normalizeVitals(out.vitals);
+  if ("allergies" in out) out.allergies = cleanAllergies(out.allergies);
+  return out;
+};
+
+// Incoming tests keep the status/report of the stored test with the same _id;
+// anything new starts as pending
+const mergeTests = (incoming: any[], existing: any[] = []) =>
+  incoming
+    .filter((t) => t && typeof t.name === "string" && t.name.trim())
+    .map((t) => {
+      const prev = t._id ? existing.find((e) => e._id?.toString() === String(t._id)) : null;
+      if (prev) {
+        const base = typeof prev.toObject === "function" ? prev.toObject() : prev;
+        return { ...base, name: t.name.trim(), type: t.type || null };
+      }
+      return {
+        name: t.name.trim(),
+        type: t.type || null,
+        status: "pending",
+        completedDate: null,
+        reportUrl: null,
+        resultSummary: null,
+        notes: null,
+      };
+    });
+
+// Tablets/capsules per dose from the dosage text ("1 tab", "½", "1/2", "২টা"); 1 when unclear
+const unitsPerDoseOf = (dosage?: string | null) => {
+  const s = String(dosage ?? "").replace(/[০-৯]/g, (d) => String(d.charCodeAt(0) - 0x09e6));
+  if (/½/.test(s)) return 0.5;
+  if (/¼/.test(s)) return 0.25;
+  const frac = /(\d+)\s*\/\s*(\d+)/.exec(s);
+  if (frac && !/ml|মিলি/i.test(s)) return parseInt(frac[1], 10) / parseInt(frac[2], 10) || 1;
+  const n = /(\d+(?:\.\d+)?)/.exec(s);
+  const v = n ? parseFloat(n[1]) : 1;
+  return v > 0 && v <= 10 ? v : 1;
+};
+
+// Days the stock lasts at this reminder's pace; null when stock isn't tracked
+export const stockDaysLeft = (r: {
+  stockCount?: number | null;
+  unitsPerDose?: number;
+  schedules?: { morning?: boolean; noon?: boolean; night?: boolean };
+  daysOfWeek?: number[];
+}) => {
+  if (r.stockCount === null || r.stockCount === undefined) return null;
+  const slots = ["morning", "noon", "night"].filter((s) => (r.schedules as any)?.[s]).length;
+  const daysPerWeek = r.daysOfWeek?.length ? r.daysOfWeek.length : 7;
+  const perDay = (r.unitsPerDose || 1) * slots * (daysPerWeek / 7);
+  return perDay > 0 ? Math.floor(r.stockCount / perDay) : null;
+};
+
+// Helper: Create reminders for medicines.
+// Structured fields are used when present; old-shaped medicines (no structured
+// fields) are normalised from their free text first. `stockByName` carries
+// tracked stock over when reminders are rebuilt after an edit.
 const createRemindersForMedicines = async (
   prescriptionId: string,
   userId: string,
-  medicines: any[]
+  medicines: any[],
+  startYmd: string,
+  stockByName: Map<string, number | null> = new Map(),
+  profileId: Types.ObjectId | null = null
 ) => {
   const reminders = [];
+  const today = ymdInAppTz();
+  // Started today → from now (so a dose slot already past isn't "due"); else from that day
+  const startDate = startYmd >= today ? new Date() : startOfDayInAppTz(startYmd);
 
-  for (const medicine of medicines) {
-    if (!medicine.dosage) continue;
+  for (const raw of medicines) {
+    const medicine = normalizeMedicine(raw);
+    if (!medicine.name) continue;
 
-    const schedule = parseDosageSchedule(medicine.frequency || medicine.dosage);
+    // As-needed and one-time medicines get no recurring reminder
+    if (medicine.scheduleType === "as_needed" || medicine.scheduleType === "once") continue;
 
+<<<<<<< HEAD
     if (schedule.totalDoses > 0) {
       const endDate = medicine.duration ? calculateEndDate(medicine.duration) : null;
       const reminder = new ReminderModel({
@@ -369,9 +473,37 @@ const createRemindersForMedicines = async (
           ? Math.max(1, Math.round((endDate.getTime() - Date.now()) / 86400000))
           : null,
       });
+=======
+    const { morning, noon, night } = medicine.schedule;
+    if (!morning && !noon && !night) continue;
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
-      reminders.push(await reminder.save());
-    }
+    const isWeekly = medicine.scheduleType === "weekly";
+    const reminder = new ReminderModel({
+      userId: new Types.ObjectId(userId),
+      profileId,
+      prescriptionId: new Types.ObjectId(prescriptionId),
+      medicineName: medicine.name,
+      dosage: medicine.dosage || "",
+      schedules: { morning, noon, night },
+      scheduleType: isWeekly ? "weekly" : "daily",
+      // Weekly with no day stated → the weekday the course started on
+      daysOfWeek: isWeekly
+        ? medicine.weekDays.length
+          ? medicine.weekDays
+          : [weekdayOfYmd(startYmd)]
+        : [],
+      isActive: true,
+      unitsPerDose: unitsPerDoseOf(medicine.dosage),
+      stockCount: stockByName.get(medicine.name) ?? null,
+      startDate,
+      endDate:
+        medicine.continueIndefinitely || !medicine.durationDays
+          ? null
+          : endDateForDays(startYmd, medicine.durationDays),
+    });
+
+    reminders.push(await reminder.save());
   }
 
   return reminders;
@@ -379,34 +511,45 @@ const createRemindersForMedicines = async (
 
 // Save prescription with user-edited data and auto-create reminders
 export const prescriptionSaveService = async (
-  prescriptionData: any,
+  body: any,
   userId: string
 ) => {
+  const prescriptionData = pickEditable(body);
+  prescriptionData.prescriptionDate = normalizePrescriptionDate(prescriptionData.prescriptionDate);
+  const startYmd = prescriptionData.prescriptionDate || ymdInAppTz();
 
-  if (prescriptionData.tests && Array.isArray(prescriptionData.tests)) {
-    prescriptionData.tests = prescriptionData.tests.map((test: any) => ({
-      name: test.name,
-      type: test.type || null,
-      status: "pending",           // ⭐ HERE - Always set to pending for new tests
-      completedDate: null,
-      reportUrl: null,
-      resultSummary: null,
-      notes: null,
-    }));
+  prescriptionData.tests = mergeTests(Array.isArray(prescriptionData.tests) ? prescriptionData.tests : []);
+  // Normalise medicines (old app versions send only the free-text fields)
+  if (Array.isArray(prescriptionData.medicines)) {
+    prescriptionData.medicines = prescriptionData.medicines
+      .filter((m: any) => m && typeof m.name === "string" && m.name.trim())
+      .map((m: any) => normalizeMedicine(m));
   }
+  // Follow-up: date = prescription date + inDays when only the interval is known
+  // (old app versions send no followUp key: look for it in the notes instead)
+  prescriptionData.followUp = normalizeFollowUp(
+    prescriptionData.followUp,
+    prescriptionData.followUp === undefined ? prescriptionData.notes : null,
+    true,
+    startYmd
+  );
+
   // Create new prescription with user-edited data
   const prescription = new PrescriptionModel({
     ...prescriptionData,
+    ocrText: typeof body?.ocrText === "string" ? body.ocrText : "",
     userId: new Types.ObjectId(userId),
+    profileId: currentProfileId(),
     status: "confirmed",
     processingStatus: "completed",
     parsedAt: new Date(),
     uploadedAt: new Date(),
-    isCurrent: prescriptionData.isCurrent ?? true,
+    isCurrent: typeof body?.isCurrent === "boolean" ? body.isCurrent : true,
     isComplete: false,
   });
 
   const savedPrescription = await prescription.save();
+  await rememberAllergies(userId, savedPrescription.allergies, savedPrescription.profileId);
 
   // Auto-create reminders if prescription is current
   if (savedPrescription.isCurrent && savedPrescription.medicines.length > 0) {
@@ -414,7 +557,10 @@ export const prescriptionSaveService = async (
       await createRemindersForMedicines(
         savedPrescription._id.toString(),
         userId,
-        savedPrescription.medicines
+        savedPrescription.medicines,
+        startYmd,
+        new Map(),
+        savedPrescription.profileId ?? null
       );
     } catch (error) {
       console.error("Failed to create reminders:", error);
@@ -429,7 +575,7 @@ export const prescriptionSaveService = async (
 export const prescriptionUpdateService = async (
   prescriptionId: string,
   userId: string,
-  updateData: any
+  body: any
 ) => {
   const prescription = await PrescriptionModel.findOne({
     _id: new Types.ObjectId(prescriptionId),
@@ -438,6 +584,7 @@ export const prescriptionUpdateService = async (
 
   if (!prescription) {
     throw createServiceError("Prescription not found or access denied", 404);
+<<<<<<< HEAD
   }
 
   // Only user-editable content may change (never userId, status, ownership flags, ...)
@@ -447,23 +594,64 @@ export const prescriptionUpdateService = async (
       (prescription as any)[key] = updateData[key];
     }
   }
+=======
+  }
+
+  const updateData = pickEditable(body);
+  if ("prescriptionDate" in updateData) {
+    updateData.prescriptionDate = normalizePrescriptionDate(updateData.prescriptionDate);
+  }
+  const startYmd = courseStartYmd({
+    prescriptionDate:
+      "prescriptionDate" in updateData ? updateData.prescriptionDate : prescription.prescriptionDate,
+    uploadedAt: prescription.uploadedAt,
+  });
+
+  if (Array.isArray(updateData.medicines)) {
+    updateData.medicines = updateData.medicines
+      .filter((m: any) => m && typeof m.name === "string" && m.name.trim())
+      .map((m: any) => normalizeMedicine(m));
+  }
+  if (Array.isArray(updateData.tests)) {
+    updateData.tests = mergeTests(updateData.tests, prescription.tests);
+  } else {
+    delete updateData.tests;
+  }
+  if ("followUp" in updateData) {
+    const prev = prescription.followUp;
+    const next = normalizeFollowUp(updateData.followUp, null, true, startYmd);
+    // Keep the "already notified" marks when the visit date didn't change
+    updateData.followUp =
+      next && prev?.date === next.date
+        ? { ...next, notifiedAt: prev?.notifiedAt ?? null, dayOfNotifiedAt: prev?.dayOfNotifiedAt ?? null }
+        : next;
+  }
+
+  Object.assign(prescription, updateData);
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
   prescription.parsedAt = new Date();
 
   const updatedPrescription = await prescription.save();
+  await rememberAllergies(userId, updateData.allergies, updatedPrescription.profileId);
 
-  // If prescription is current, recreate reminders with updated data
-  if (updatedPrescription.isCurrent && updatedPrescription.medicines.length > 0) {
+  // Rebuild reminders from the edited medicines (courses still count from the
+  // prescription date, so an edit doesn't restart them)
+  if (updatedPrescription.isCurrent && !updatedPrescription.isComplete) {
     try {
-      // Delete old reminders
-      await ReminderModel.deleteMany({
+      const owned = {
         prescriptionId: new Types.ObjectId(prescriptionId),
-      });
-
-      // Create new reminders with updated medicine data
+        userId: new Types.ObjectId(userId),
+      };
+      const old = await ReminderModel.find(owned).select("medicineName stockCount").lean();
+      const stockByName = new Map(old.map((r) => [r.medicineName, r.stockCount ?? null]));
+      await ReminderModel.deleteMany(owned);
       await createRemindersForMedicines(
         prescriptionId,
         userId,
-        updatedPrescription.medicines
+        updatedPrescription.medicines,
+        startYmd,
+        stockByName,
+        updatedPrescription.profileId ?? null
       );
     } catch (error) {
       console.error("Failed to update reminders:", error);
@@ -473,10 +661,107 @@ export const prescriptionUpdateService = async (
   return updatedPrescription;
 };
 
+// ---------- Duplicate medicine check ----------
+// "Napa 500 mg" / "Tab. Napa" → "napa"
+const brandKey = (name: string) =>
+  name
+    .toLowerCase()
+    .replace(/^(tab|cap|syp|syr|susp|inj|drop|drops)\.?\s+/i, "")
+    .replace(/[\d০-৯.,]+\s*(mg|mcg|g|ml|iu|units?|%|মিগ্রা|মিলি)?(\s*\/\s*[\d০-৯.]+\s*(ml|মিলি)?)?/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+// "Paracetamol + Caffeine" → ["paracetamol", "caffeine"]
+const ingredients = (generic?: string | null) =>
+  String(generic ?? "")
+    .toLowerCase()
+    .split(/\s*(?:\+|,|\/|&|\band\b)\s*/)
+    .map((s) => s.replace(/[^a-z\s-]/g, "").trim())
+    .filter((s) => s.length > 2);
+
+export interface MedicineWarning {
+  medicine: string;
+  conflictsWith: string;
+  reason: "same_medicine" | "same_ingredient" | "allergy";
+  ingredient: string | null;
+  // null = the clash is inside the prescription being saved
+  existing: { prescriptionId: string; doctorName: string | null } | null;
+}
+
+/**
+ * Medicines in `medicines` that repeat one already being taken (same brand,
+ * or a shared active ingredient — e.g. two paracetamol brands), or each other.
+ */
+export const checkMedicinesService = async (
+  userId: string,
+  rawMedicines: any[],
+  excludePrescriptionId?: string,
+  extraAllergies: string[] = []
+): Promise<MedicineWarning[]> => {
+  const today = ymdInAppTz();
+  const allergies = mergeAllergies(await allergiesOf(userId), cleanAllergies(extraAllergies));
+  const current = await PrescriptionModel.find({
+    userId: new Types.ObjectId(userId),
+    ...profileFilter(),
+    isCurrent: true,
+    isComplete: { $ne: true },
+    ...(excludePrescriptionId && Types.ObjectId.isValid(excludePrescriptionId)
+      ? { _id: { $ne: new Types.ObjectId(excludePrescriptionId) } }
+      : {}),
+  })
+    .select("medicines doctor prescriptionDate uploadedAt")
+    .lean();
+
+  // Only medicines whose course is still running
+  const existing = current.flatMap((p) => {
+    const start = courseStartYmd(p);
+    return p.medicines
+      .map((m) => normalizeMedicine(m))
+      .filter((m) => m.continueIndefinitely || !m.durationDays || addDaysYmd(start, m.durationDays - 1) >= today)
+      .map((m) => ({ med: m, prescriptionId: p._id.toString(), doctorName: p.doctor?.name ?? null }));
+  });
+
+  const incoming = (Array.isArray(rawMedicines) ? rawMedicines : [])
+    .filter((m) => m && typeof m.name === "string" && m.name.trim())
+    .map((m) => normalizeMedicine(m));
+
+  const clash = (a: NormalizedMedicine, b: NormalizedMedicine) => {
+    const ka = brandKey(a.name);
+    if (ka && ka === brandKey(b.name)) return { reason: "same_medicine" as const, ingredient: null };
+    const shared = ingredients(a.genericName).find((i) => ingredients(b.genericName).includes(i));
+    return shared ? { reason: "same_ingredient" as const, ingredient: shared } : null;
+  };
+
+  const warnings: MedicineWarning[] = [];
+  incoming.forEach((med, i) => {
+    const allergy = allergyClash(med, allergies);
+    if (allergy) {
+      warnings.push({ medicine: med.name, conflictsWith: allergy, reason: "allergy", ingredient: null, existing: null });
+    }
+    for (const e of existing) {
+      const c = clash(med, e.med);
+      if (c) {
+        warnings.push({
+          medicine: med.name,
+          conflictsWith: e.med.name,
+          ...c,
+          existing: { prescriptionId: e.prescriptionId, doctorName: e.doctorName },
+        });
+      }
+    }
+    for (const other of incoming.slice(i + 1)) {
+      const c = clash(med, other);
+      if (c) warnings.push({ medicine: med.name, conflictsWith: other.name, ...c, existing: null });
+    }
+  });
+  return warnings;
+};
+
 // Get all prescriptions for a user
 export const prescriptionGetAllService = async (userId: string) => {
   const prescriptions = await PrescriptionModel.find({
     userId: new Types.ObjectId(userId),
+    ...profileFilter(),
   })
     .sort({ uploadedAt: -1 })
     .lean();
@@ -488,6 +773,7 @@ export const prescriptionGetAllService = async (userId: string) => {
 export const prescriptionGetCurrentService = async (userId: string) => {
   const prescriptions = await PrescriptionModel.find({
     userId: new Types.ObjectId(userId),
+    ...profileFilter(),
     isCurrent: true,
   })
     .sort({ uploadedAt: -1 })
@@ -500,6 +786,7 @@ export const prescriptionGetCurrentService = async (userId: string) => {
 export const getActiveMedicationsService = async (userId: string) => {
   const currentPrescriptions = await PrescriptionModel.find({
     userId: new Types.ObjectId(userId),
+    ...profileFilter(),
     isCurrent: true,
     isComplete: false, 
   })
@@ -542,7 +829,10 @@ export const prescriptionDeleteByIdService = async (
   prescriptionId: string,
   userId: string
 ) => {
+<<<<<<< HEAD
   // Ownership first: only the owner may delete (and only then touch reminders)
+=======
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
   const deletedPrescription = await PrescriptionModel.findOneAndDelete({
     _id: new Types.ObjectId(prescriptionId),
     userId: new Types.ObjectId(userId),
@@ -552,11 +842,34 @@ export const prescriptionDeleteByIdService = async (
     throw createServiceError("Prescription not found or access denied", 404);
   }
 
+<<<<<<< HEAD
   await ReminderModel.deleteMany({
     prescriptionId: new Types.ObjectId(prescriptionId),
   });
+=======
+  // Only after ownership is confirmed: its reminders and their dose history
+  const owned = { prescriptionId: deletedPrescription._id, userId: deletedPrescription.userId };
+  const reminderIds = await ReminderModel.find(owned).distinct("_id");
+  await DoseLogModel.deleteMany({ reminderId: { $in: reminderIds } });
+  await ReminderModel.deleteMany(owned);
+  await Promise.all(deletedPrescription.tests.map((t) => deleteReport(t.reportUrl)));
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
   return deletedPrescription;
+};
+
+// Everything saved for one family member (used when the member is removed)
+export const deleteProfileDataService = async (userId: string, profileId: Types.ObjectId) => {
+  const owner = { userId: new Types.ObjectId(userId), profileId };
+  const prescriptions = await PrescriptionModel.find(owner).select("_id tests.reportUrl").lean();
+  const ids = prescriptions.map((p) => p._id);
+  const reminderIds = await ReminderModel.find({ prescriptionId: { $in: ids } }).distinct("_id");
+  await DoseLogModel.deleteMany({ reminderId: { $in: reminderIds } });
+  await ReminderModel.deleteMany({ prescriptionId: { $in: ids } });
+  await PrescriptionFeedbackModel.deleteMany({ prescriptionId: { $in: ids } });
+  await ClinicalNarrativeModel.deleteMany(owner);
+  await Promise.all(prescriptions.flatMap((p) => p.tests.map((t) => deleteReport(t.reportUrl))));
+  await PrescriptionModel.deleteMany({ _id: { $in: ids } });
 };
 
 // Toggle prescription current/archived status
@@ -600,14 +913,232 @@ export const togglePrescriptionCurrentStatus = async (
 };
 
 // Get user reminders
+// Calendar day in the app's timezone (users are in Bangladesh; the server runs in UTC)
+export const todayInAppTimezone = (date = new Date()) =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: appConfig.APP_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+
+// Reminders due on the given day: daily ones, and weekly ones on their weekday
+// (reminders created before daysOfWeek existed have no field → every day)
+const dueOnDayFilter = (dayOfWeek: number) => ({
+  $or: [
+    { daysOfWeek: { $exists: false } },
+    { daysOfWeek: { $size: 0 } },
+    { daysOfWeek: dayOfWeek },
+  ],
+});
+
 export const getUserRemindersService = async (userId: string) => {
-  return await ReminderModel.find({
+  const now = new Date();
+  const reminders = await ReminderModel.find({
     userId: new Types.ObjectId(userId),
+    ...profileFilter(),
     isActive: true,
+    startDate: { $lte: now },
+    $and: [
+      { $or: [{ endDate: null }, { endDate: { $gte: now } }] },
+      dueOnDayFilter(weekdayInAppTz(now)),
+    ],
   })
     .populate("prescriptionId", "doctor patient uploadedAt")
     .sort({ createdAt: -1 })
     .lean();
+
+  // Attach which of today's doses were already marked as taken
+  const logs = await DoseLogModel.find({
+    reminderId: { $in: reminders.map((r) => r._id) },
+    date: todayInAppTimezone(now),
+  }).lean();
+
+  // Dose times are the user's (one setting for all medicines)
+  const user = await User.findById(userId).select("reminderTimes").lean();
+  const timings = { ...DEFAULT_REMINDER_TIMES, ...(user?.reminderTimes ?? {}) };
+
+  return reminders.map((r) => {
+    const taken = logs.filter((l) => l.reminderId.equals(r._id));
+    return {
+      ...r,
+      timings,
+      stockDaysLeft: stockDaysLeft(r),
+      scheduleType: r.scheduleType || "daily",
+      daysOfWeek: r.daysOfWeek || [],
+      takenToday: {
+        morning: taken.some((l) => l.slot === "morning"),
+        noon: taken.some((l) => l.slot === "noon"),
+        night: taken.some((l) => l.slot === "night"),
+      },
+    };
+  });
+};
+
+// Everything the phone needs to schedule its own alarms for the coming days:
+// every active, not-yet-ended reminder plus the user's dose times
+export const getReminderScheduleService = async (userId: string) => {
+  const now = new Date();
+  const [reminders, user] = await Promise.all([
+    ReminderModel.find({
+      userId: new Types.ObjectId(userId),
+      isActive: true,
+      $or: [{ endDate: null }, { endDate: { $gte: now } }],
+    })
+      .select("prescriptionId profileId medicineName dosage schedules scheduleType daysOfWeek startDate endDate")
+      .lean(),
+    User.findById(userId).select("reminderTimes localAlarms profiles").lean(),
+  ]);
+  // The phone rings for every family member; alarms name whose medicine it is
+  const nameOf = (pid?: Types.ObjectId | null) =>
+    pid ? user?.profiles?.find((p) => p._id.equals(pid))?.name ?? null : null;
+  return {
+    timezone: appConfig.APP_TIMEZONE,
+    reminderTimes: { ...DEFAULT_REMINDER_TIMES, ...(user?.reminderTimes ?? {}) },
+    localAlarms: !!user?.localAlarms,
+    reminders: reminders.map((r) => ({
+      _id: r._id,
+      prescriptionId: r.prescriptionId,
+      profileName: nameOf(r.profileId),
+      medicineName: r.medicineName,
+      dosage: r.dosage,
+      schedules: r.schedules,
+      daysOfWeek: r.scheduleType === "weekly" ? r.daysOfWeek || [] : [],
+      startDate: r.startDate,
+      endDate: r.endDate ?? null,
+    })),
+  };
+};
+
+// Doses taken vs. doses that were due over the last `days` days (today
+// included, but only slots whose time has passed). Uses active reminders.
+export const getAdherenceService = async (userId: string, days = 7) => {
+  const now = new Date();
+  const today = ymdInAppTz(now);
+  const [reminders, user] = await Promise.all([
+    ReminderModel.find({ userId: new Types.ObjectId(userId), ...profileFilter(), isActive: true }).lean(),
+    User.findById(userId).select("reminderTimes").lean(),
+  ]);
+  const times = { ...DEFAULT_REMINDER_TIMES, ...(user?.reminderTimes ?? {}) };
+  const firstDay = addDaysYmd(today, -(days - 1));
+  const logs = await DoseLogModel.find({
+    reminderId: { $in: reminders.map((r) => r._id) },
+    date: { $gte: firstDay, $lte: today },
+  }).lean();
+  const taken = new Set(logs.map((l) => `${l.reminderId}|${l.date}|${l.slot}`));
+
+  const slotInstant = (ymd: string, hhmm: string) => {
+    const [h, m] = hhmm.split(":").map(Number);
+    return new Date(startOfDayInAppTz(ymd).getTime() + (h * 60 + m) * 60000);
+  };
+
+  const perDay: Array<{ date: string; scheduled: number; taken: number }> = [];
+  const perMed = new Map<string, { name: string; scheduled: number; taken: number }>();
+  for (let i = 0; i < days; i++) {
+    const ymd = addDaysYmd(firstDay, i);
+    const weekday = weekdayOfYmd(ymd);
+    const day = { date: ymd, scheduled: 0, taken: 0 };
+    for (const r of reminders) {
+      if (r.daysOfWeek?.length && !r.daysOfWeek.includes(weekday)) continue;
+      for (const slot of ["morning", "noon", "night"] as const) {
+        if (!r.schedules?.[slot]) continue;
+        const at = slotInstant(ymd, times[slot]);
+        const done = taken.has(`${r._id}|${ymd}|${slot}`);
+        // A dose marked taken early still counts before its time comes
+        if ((at > now && !done) || at < new Date(r.startDate) || (r.endDate && at > new Date(r.endDate))) continue;
+        day.scheduled++;
+        if (done) day.taken++;
+        const med = perMed.get(r.medicineName) ?? { name: r.medicineName, scheduled: 0, taken: 0 };
+        med.scheduled++;
+        if (done) med.taken++;
+        perMed.set(r.medicineName, med);
+      }
+    }
+    perDay.push(day);
+  }
+
+  const scheduled = perDay.reduce((s, d) => s + d.scheduled, 0);
+  const takenCount = perDay.reduce((s, d) => s + d.taken, 0);
+  return {
+    days,
+    scheduled,
+    taken: takenCount,
+    percent: scheduled ? Math.round((takenCount / scheduled) * 100) : null,
+    perDay,
+    perMedicine: [...perMed.values()]
+      .map((m) => ({ ...m, percent: m.scheduled ? Math.round((m.taken / m.scheduled) * 100) : null }))
+      .sort((a, b) => (a.percent ?? 101) - (b.percent ?? 101)),
+  };
+};
+
+// Units on hand for a reminder (null = stop tracking)
+export const setReminderStockService = async (userId: string, reminderId: string, count: number | null) => {
+  const reminder = await ReminderModel.findOneAndUpdate(
+    { _id: new Types.ObjectId(reminderId), userId: new Types.ObjectId(userId) },
+    { $set: { stockCount: count, refillAlertedAt: null } },
+    { new: true }
+  ).lean();
+  if (!reminder) {
+    throw createServiceError("Reminder not found", 404);
+  }
+  return { reminderId, stockCount: reminder.stockCount ?? null, daysLeft: stockDaysLeft(reminder) };
+};
+
+// Tracked medicines with 3 days or less left, not alerted in the last 2 days
+export const getLowStockRemindersService = async () => {
+  const twoDaysAgo = new Date(Date.now() - 2 * 86400000);
+  const now = new Date();
+  const reminders = await ReminderModel.find({
+    isActive: true,
+    stockCount: { $ne: null },
+    $and: [
+      { $or: [{ endDate: null }, { endDate: { $gte: now } }] },
+      { $or: [{ refillAlertedAt: null }, { refillAlertedAt: { $lt: twoDaysAgo } }] },
+    ],
+  }).lean();
+  return reminders
+    .map((r) => ({ reminder: r, daysLeft: stockDaysLeft(r) }))
+    .filter((x): x is { reminder: typeof x.reminder; daysLeft: number } => x.daysLeft !== null && x.daysLeft <= 3);
+};
+
+// Mark (taken = true) or unmark one of today's doses
+export const setDoseTakenService = async (
+  userId: string,
+  reminderId: string,
+  slot: DoseSlot,
+  taken: boolean
+) => {
+  const reminder = await ReminderModel.findOne({
+    _id: new Types.ObjectId(reminderId),
+    userId: new Types.ObjectId(userId),
+  }).lean();
+  if (!reminder) {
+    throw createServiceError("Reminder not found", 404);
+  }
+  if (!reminder.schedules?.[slot]) {
+    throw createServiceError(`This medicine has no ${slot} dose`, 400);
+  }
+
+  const key = { reminderId: reminder._id, slot, date: todayInAppTimezone() };
+  // Only a real change moves the stock (marking twice must not use two doses)
+  let changed = false;
+  if (taken) {
+    const res = await DoseLogModel.updateOne(
+      key,
+      { $setOnInsert: { ...key, userId: reminder.userId, takenAt: new Date() } },
+      { upsert: true }
+    );
+    changed = res.upsertedCount > 0;
+  } else {
+    changed = (await DoseLogModel.deleteOne(key)).deletedCount > 0;
+  }
+  if (changed && reminder.stockCount !== null && reminder.stockCount !== undefined) {
+    const delta = (taken ? -1 : 1) * (reminder.unitsPerDose || 1);
+    await ReminderModel.updateOne({ _id: reminder._id }, [
+      { $set: { stockCount: { $max: [0, { $add: ["$stockCount", delta] }] } } },
+    ]);
+  }
+  return { reminderId, slot, taken, date: key.date };
 };
 
 // Get due reminders for notification scheduler
@@ -619,18 +1150,84 @@ export const getDueRemindersService = async (
   return await ReminderModel.find({
     isActive: true,
     [`schedules.${timeSlot}`]: true,
-    $or: [{ endDate: null }, { endDate: { $gte: now } }],
     startDate: { $lte: now },
+    $and: [
+      { $or: [{ endDate: null }, { endDate: { $gte: now } }] },
+      // Weekly reminders only on their weekday (app timezone)
+      dueOnDayFilter(weekdayInAppTz(now)),
+    ],
   })
-    .populate("userId", "email name")
+    .populate("userId", "email name localAlarms profiles")
     .lean();
+};
+
+// Upcoming follow-up visits (today or later), soonest first
+export const getUpcomingFollowUpsService = async (userId: string) => {
+  const today = ymdInAppTz();
+  const prescriptions = await PrescriptionModel.find({
+    userId: new Types.ObjectId(userId),
+    ...profileFilter(),
+    "followUp.date": { $gte: today },
+  })
+    .select("doctor followUp uploadedAt")
+    .sort({ "followUp.date": 1 })
+    .lean();
+
+  return prescriptions.map((p) => ({
+    prescriptionId: p._id,
+    doctorName: p.doctor?.name ?? null,
+    doctorSpecialization: p.doctor?.specialization ?? null,
+    date: p.followUp!.date,
+    inDays: p.followUp?.inDays ?? null,
+    note: p.followUp?.note ?? null,
+    prescribedAt: p.uploadedAt,
+  }));
+};
+
+// Follow-up visits still to be announced: tomorrow's ("visit tomorrow", checked
+// on every reminder run so one saved late in the day is still announced) and
+// today's ("visit today")
+export const getFollowUpsToNotifyService = async (when: "tomorrow" | "today") => {
+  const today = ymdInAppTz();
+  return await PrescriptionModel.find({
+    isComplete: { $ne: true },
+    ...(when === "tomorrow"
+      ? { "followUp.date": addDaysYmd(today, 1), "followUp.notifiedAt": null }
+      : { "followUp.date": today, "followUp.dayOfNotifiedAt": null }),
+  })
+    .select("userId doctor followUp tests")
+    .lean();
+};
+
+// Prescriptions whose pending tests are due a "still pending" nudge: stage 1
+// from day 3 after the prescription date, stage 2 from day 7
+export const getPendingTestRemindersService = async () => {
+  const today = ymdInAppTz();
+  const prescriptions = await PrescriptionModel.find({
+    isComplete: { $ne: true },
+    tests: { $elemMatch: { status: "pending", reminderStage: { $not: { $gte: 2 } } } },
+  })
+    .select("userId doctor tests prescriptionDate uploadedAt")
+    .lean();
+
+  return prescriptions.flatMap((p) => {
+    const start = courseStartYmd(p);
+    const days = Math.round(
+      (Date.parse(`${today}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000
+    );
+    const stage = days >= 7 ? 2 : days >= 3 ? 1 : 0;
+    const due = p.tests.filter((t: any) => t.status === "pending" && (t.reminderStage ?? 0) < stage);
+    // Old prescriptions (well past day 7) are not nagged retroactively
+    if (!stage || !due.length || days > 30) return [];
+    return [{ prescription: p, stage, days, tests: due }];
+  });
 };
 
 // Get prescription statistics
 export const getPrescriptionStatsService = async (userId: string) => {
   const stats = await PrescriptionModel.aggregate([
     {
-      $match: { userId: new Types.ObjectId(userId) },
+      $match: { userId: new Types.ObjectId(userId), ...profileFilter() },
     },
     {
       $facet: {
@@ -703,6 +1300,7 @@ export const getHealthInsightsService = async (
 ): Promise<IHealthInsights> => {
   const prescriptions = await PrescriptionModel.find({
     userId: new Types.ObjectId(userId),
+    ...profileFilter(),
     status: "confirmed",
   })
     .sort({ uploadedAt: -1 })
@@ -943,6 +1541,7 @@ export const getPrescriptionDetailsService = async (
 export const getPendingTestsService = async (userId: string) => {
   const prescriptions = await PrescriptionModel.find({
     userId: new Types.ObjectId(userId),
+    ...profileFilter(),
     "tests.status": "pending",
   })
     .select("_id doctor patient uploadedAt diagnosis tests")
@@ -970,9 +1569,12 @@ export const completeTestService = async (
   testId: string,
   userId: string,
   data: {
-    reportUrl?: string;
+    reportKey: string;
+    reportMimeType: string;
     resultSummary?: string;
     notes?: string;
+    results: LabResult[];
+    aiSummary: string | null;
   }
 ) => {
   const prescription = await PrescriptionModel.findOne({
@@ -981,6 +1583,10 @@ export const completeTestService = async (
   });
 
   if (!prescription) {
+<<<<<<< HEAD
+=======
+    await deleteReport(data.reportKey);
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
     throw createServiceError("Prescription not found or access denied", 404);
   }
 
@@ -990,22 +1596,50 @@ export const completeTestService = async (
   );
 
   if (testIndex === -1) {
+<<<<<<< HEAD
+=======
+    await deleteReport(data.reportKey);
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
     throw createServiceError("Test not found in this prescription", 404);
   }
 
-  // Update test properties
+  const previousReport = prescription.tests[testIndex].reportUrl;
   prescription.tests[testIndex].status = "completed";
   prescription.tests[testIndex].completedDate = new Date();
-  prescription.tests[testIndex].reportUrl = data.reportUrl || null;
-  prescription.tests[testIndex].resultSummary = data.resultSummary || null;
+  prescription.tests[testIndex].reportUrl = data.reportKey;
+  prescription.tests[testIndex].reportMimeType = data.reportMimeType;
+  // The patient's own words win; else the AI's reading of the report
+  prescription.tests[testIndex].resultSummary = data.resultSummary?.trim() || data.aiSummary || null;
+  prescription.tests[testIndex].results = data.results;
+  prescription.tests[testIndex].aiSummary = data.aiSummary;
   prescription.tests[testIndex].notes = data.notes || null;
 
   await prescription.save();
+  if (previousReport && previousReport !== data.reportKey) await deleteReport(previousReport);
 
   return {
     prescriptionId: prescription._id,
     test: prescription.tests[testIndex],
   };
+};
+
+// The owner's stored report for one test
+export const getTestReportService = async (
+  prescriptionId: string,
+  testId: string,
+  userId: string
+) => {
+  const prescription = await PrescriptionModel.findOne({
+    _id: new Types.ObjectId(prescriptionId),
+    userId: new Types.ObjectId(userId),
+  })
+    .select("tests")
+    .lean();
+  const test = prescription?.tests.find((t: any) => t._id?.toString() === testId);
+  if (!test?.reportUrl) {
+    throw createServiceError("Report not found", 404);
+  }
+  return { key: test.reportUrl, mimeType: test.reportMimeType || null };
 };
 
 export const getPrescriptionTestsService = async (
@@ -1034,6 +1668,7 @@ export const getPrescriptionTestsService = async (
 export const getCompletedTestsService = async (userId: string) => {
   const prescriptions = await PrescriptionModel.find({
     userId: new Types.ObjectId(userId),
+    ...profileFilter(),
     "tests.status": "completed",
   })
     .select("_id doctor uploadedAt tests")
@@ -1049,7 +1684,7 @@ export const getCompletedTestsService = async (userId: string) => {
         testType: test.type,
         status: test.status,
         completedDate: test.completedDate,
-        reportUrl: test.reportUrl,
+        hasReport: !!test.reportUrl,
         resultSummary: test.resultSummary,
         notes: test.notes,
         doctorName: prescription.doctor?.name,
@@ -1070,7 +1705,11 @@ export const cancelTestService = async (
     _id: new Types.ObjectId(prescriptionId),
     userId: new Types.ObjectId(userId),
   });
+  if (!prescription) {
+    throw createServiceError("Prescription not found or access denied", 404);
+  }
 
+<<<<<<< HEAD
   if (!prescription) {
     throw createServiceError("Prescription not found or access denied", 404);
   }
@@ -1091,6 +1730,21 @@ export const cancelTestService = async (
     prescriptionId: prescription._id,
     test: test.toObject(),
   };
+=======
+  const test = prescription.tests.find((t) => t._id?.toString() === testId);
+  if (!test) {
+    throw createServiceError("Test not found in this prescription", 404);
+  }
+  if (test.status === "completed") {
+    throw createServiceError("A completed test cannot be cancelled", 400);
+  }
+
+  test.status = "cancelled";
+  test.notes = (typeof reason === "string" && reason.trim()) || "Cancelled by user";
+  await prescription.save();
+
+  return { prescriptionId: prescription._id, test };
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 };
 
 export const areAllTestsCompletedService = async (
@@ -1116,6 +1770,7 @@ export const areAllTestsCompletedService = async (
 export const getTestStatsService = async (userId: string) => {
   const prescriptions = await PrescriptionModel.find({
     userId: new Types.ObjectId(userId),
+    ...profileFilter(),
   })
     .select("tests")
     .lean();
@@ -1199,6 +1854,7 @@ export const getPrescriptionFeedback = async (
 export const getClinicalSummaryService = async (userId: string) => {
   const prescriptions = await PrescriptionModel.find({
     userId: new Types.ObjectId(userId),
+    ...profileFilter(),
     status: "confirmed",
   })
     .sort({ uploadedAt: 1 })
@@ -1495,8 +2151,9 @@ export interface DetailedClinicalSummary {
     age: string;
     gender: string;
     contact: string;
+    allergies: string[];
   };
-  
+
   // Treatment overview
   treatmentPeriod: {
     firstVisit: Date;
@@ -1557,6 +2214,9 @@ export interface DetailedClinicalSummary {
   
   // Clinical recommendations (auto-generated)
   clinicalObservations: string[];
+
+  // Measured vitals per visit, oldest first (only visits with any vital)
+  vitalsTrend: Array<{ date: string; written: Partial<Record<string, string | null>>; values: Record<string, number | null> }>;
 }
 
 // Helper: Calculate months difference
@@ -1597,13 +2257,14 @@ export const getDetailedClinicalSummaryService = async (
   // Fetch all prescriptions and feedbacks
   const prescriptions = await PrescriptionModel.find({
     userId: new Types.ObjectId(userId),
+    ...profileFilter(),
     status: "confirmed",
   })
     .sort({ uploadedAt: 1 })
     .lean();
 
   if (prescriptions.length === 0) {
-    throw new Error("No prescriptions found for this user");
+    throw createServiceError("No prescriptions found for this user", 404);
   }
 
   const feedbacks = await PrescriptionFeedbackModel.find({
@@ -1622,6 +2283,7 @@ export const getDetailedClinicalSummaryService = async (
     age: latestPrescription.patient?.age || "N/A",
     gender: latestPrescription.patient?.gender || "N/A",
     contact: latestPrescription.patient?.contact || "N/A",
+    allergies: mergeAllergies(await allergiesOf(userId), prescriptions.flatMap((p) => p.allergies ?? [])),
   };
 
   // === TREATMENT PERIOD ===
@@ -1700,11 +2362,16 @@ export const getDetailedClinicalSummaryService = async (
         });
         
         if (test.status === "completed") {
+          const outOfRange = (test.results ?? [])
+            .filter((r: LabResult) => r.flag === "high" || r.flag === "low")
+            .map((r: LabResult) => `${r.name} ${r.value}${r.unit ? " " + r.unit : ""} (${r.flag})`);
           completedTests.push({
             name: test.name,
             type: test.type,
             completedDate: test.completedDate,
-            resultSummary: test.resultSummary,
+            resultSummary: [test.resultSummary, outOfRange.length ? `Out of range: ${outOfRange.join(", ")}` : null]
+              .filter(Boolean)
+              .join(". "),
             notes: test.notes,
           });
         }
@@ -1806,6 +2473,7 @@ export const getDetailedClinicalSummaryService = async (
         testsByType.set(key, []);
       }
       testsByType.get(key)!.push({
+        name: test.name,
         date: test.completedDate,
         periodLabel: period.periodLabel,
         status: "completed",
@@ -1818,8 +2486,10 @@ export const getDetailedClinicalSummaryService = async (
   const testResultsSummary: TestResultsByType[] = Array.from(testsByType.entries()).map(
     ([testType, results]) => ({
       testType,
-      testName: results[0]?.notes || testType,
-      results: results.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()),
+      testName: results[0]?.name || testType,
+      results: results
+        .map(({ name, ...r }) => r)
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()),
     })
   );
   
@@ -1958,6 +2628,18 @@ export const getDetailedClinicalSummaryService = async (
     clinicalObservations.push(`Highly effective medications: ${highEffectiveness.map(m => m.name).slice(0, 3).join(", ")}`);
   }
   
+  const vitalsTrend = prescriptions
+    .filter((p) => p.vitals)
+    .map((p) => {
+      const { values, ...written } = p.vitals as any;
+      return {
+        date: p.prescriptionDate || ymdInAppTz(new Date(p.uploadedAt)),
+        written,
+        values: values ?? {},
+      };
+    })
+    .sort((a, b) => a.date.localeCompare(b.date));
+
   return {
     generatedAt: new Date(),
     patientInfo,
@@ -1967,16 +2649,17 @@ export const getDetailedClinicalSummaryService = async (
     healthProgressionSummary,
     medicationAnalysis,
     clinicalObservations,
+    vitalsTrend,
   };
 };
 export const generateClinicalSummaryPDFService = async (
   userId: string
 ): Promise<Buffer> => {
-  // Get the AI narrative
-  const narrative = await generateAIClinicalNarrativeService(userId);
-  
-  // Get basic patient info
   const summary = await getDetailedClinicalSummaryService(userId);
+  const adherence = await getAdherenceService(userId, 30);
+  const narrative =
+    (await getClinicalNarrativeService(userId, summary)) ??
+    "The written clinical narrative could not be generated right now. Please try again later.";
 
   return new Promise((resolve, reject) => {
     try {
@@ -1992,6 +2675,7 @@ export const generateClinicalSummaryPDFService = async (
         const pdfBuffer = Buffer.concat(buffers);
         resolve(pdfBuffer);
       });
+      registerPdfFonts(doc);
 
       // Header
       doc
@@ -2003,7 +2687,10 @@ export const generateClinicalSummaryPDFService = async (
       doc
         .fontSize(10)
         .font('Helvetica')
-        .text(`Generated: ${new Date().toLocaleString()}`, { align: 'center' })
+        .text(
+          `Generated: ${new Date().toLocaleString('en-GB', { timeZone: appConfig.APP_TIMEZONE })}`,
+          { align: 'center' }
+        )
         .moveDown(0.5);
 
       // Horizontal line
@@ -2015,12 +2702,38 @@ export const generateClinicalSummaryPDFService = async (
 
       // Patient Info
       doc.fontSize(12).font('Helvetica-Bold').text('Patient Information').moveDown(0.3);
-      doc.fontSize(10).font('Helvetica');
-      doc.text(`Name: ${summary.patientInfo.name}`);
-      doc.text(`Age: ${summary.patientInfo.age} years`);
-      doc.text(`Gender: ${summary.patientInfo.gender === 'M' ? 'Male' : 'Female'}`);
-      doc.text(`Contact: ${summary.patientInfo.contact}`);
+      doc.fontSize(10);
+      writeMixed(doc, `Name: ${summary.patientInfo.name}`);
+      writeMixed(doc, `Age: ${formatAge(summary.patientInfo.age)}`);
+      writeMixed(doc, `Gender: ${formatGender(summary.patientInfo.gender)}`);
+      writeMixed(doc, `Contact: ${summary.patientInfo.contact}`);
+      writeMixed(doc, `Allergies: ${summary.patientInfo.allergies.join(', ') || 'None recorded'}`, {
+        bold: summary.patientInfo.allergies.length > 0,
+      });
       doc.moveDown(1);
+
+      if (adherence.percent !== null) {
+        doc.fontSize(12).font('Helvetica-Bold').text('Medicine Adherence (last 30 days)').moveDown(0.3);
+        doc.fontSize(10).font('Helvetica')
+          .text(`${adherence.percent}% of doses marked as taken (${adherence.taken} of ${adherence.scheduled})`);
+        const missed = adherence.perMedicine.filter((m) => m.percent !== null && m.percent < 80);
+        if (missed.length) {
+          writeMixed(doc, `Most missed: ${missed.slice(0, 3).map((m) => `${m.name} (${m.percent}%)`).join(', ')}`);
+        }
+        doc.moveDown(1);
+      }
+
+      if (summary.vitalsTrend.length) {
+        doc.fontSize(12).font('Helvetica-Bold').text('Vitals by Visit').moveDown(0.3);
+        doc.fontSize(10);
+        for (const v of summary.vitalsTrend) {
+          const parts = Object.entries(VITAL_LABELS)
+            .filter(([k]) => v.written[k])
+            .map(([k, label]) => `${label} ${v.written[k]}`);
+          writeMixed(doc, `${v.date}:  ${parts.join('  ·  ')}`);
+        }
+        doc.moveDown(1);
+      }
 
       // Horizontal line
       doc
@@ -2036,13 +2749,7 @@ export const generateClinicalSummaryPDFService = async (
         .text('Clinical Narrative', { underline: true })
         .moveDown(0.5);
 
-      doc
-        .fontSize(11)
-        .font('Helvetica')
-        .text(narrative, {
-          align: 'justify',
-          lineGap: 5,
-        });
+      writeMarkdownToPdf(doc, narrative);
 
       doc.moveDown(2);
 
@@ -2064,14 +2771,49 @@ export const generateClinicalSummaryPDFService = async (
     }
   });
 };
+// Narrative for this exact summary data: cached, else generated and cached.
+// Returns null (not an error) when Gemini is unavailable, so the summary still loads.
+export const getClinicalNarrativeService = async (
+  userId: string,
+  summaryData: DetailedClinicalSummary
+): Promise<string | null> => {
+  const { generatedAt, ...stable } = summaryData;
+  const fingerprint = crypto.createHash("sha256").update(JSON.stringify(stable)).digest("hex");
+
+  // One cached narrative per person
+  const key = { userId: new Types.ObjectId(userId), ...profileFilter() };
+  const cached = await ClinicalNarrativeModel.findOne(key).lean();
+  if (cached?.fingerprint === fingerprint) return cached.narrative;
+
+  try {
+    const narrative = await generateAIClinicalNarrativeService(userId, summaryData);
+    await ClinicalNarrativeModel.updateOne(
+      key,
+      { fingerprint, narrative, generatedAt: new Date() },
+      { upsert: true }
+    );
+    return narrative;
+  } catch (error) {
+    console.error("❌ Clinical narrative unavailable:", error);
+    // Better an older narrative than none
+    return cached?.narrative ?? null;
+  }
+};
+
 export const generateAIClinicalNarrativeService = async (
   userId: string,
+<<<<<<< HEAD
   summaryData?: Awaited<ReturnType<typeof getDetailedClinicalSummaryService>>
 ): Promise<string> => {
   // Accept pre-fetched summary to avoid double DB call
   if (!summaryData) {
     summaryData = await getDetailedClinicalSummaryService(userId);
   }
+=======
+  summary?: DetailedClinicalSummary
+): Promise<string> => {
+  const summaryData = summary ?? (await getDetailedClinicalSummaryService(userId));
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
   // Create a prompt for Gemini to generate narrative clinical notes
   const prompt = `
@@ -2088,6 +2830,7 @@ CRITICAL RULES:
 - Name: ${summaryData.patientInfo.name}
 - Age: ${summaryData.patientInfo.age}
 - Gender: ${summaryData.patientInfo.gender}
+- Known allergies: ${summaryData.patientInfo.allergies.join(', ') || 'None recorded'}
 
 **Treatment Period:**
 - First Visit: ${new Date(summaryData.treatmentPeriod.firstVisit).toLocaleDateString()}
@@ -2141,6 +2884,13 @@ ${summaryData.medicationAnalysis.slice(0, 10).map(med => `
 **Clinical Observations:**
 ${summaryData.clinicalObservations.map((obs, i) => `${i + 1}. ${obs}`).join('\n')}
 
+**Vitals by visit (as written):**
+${summaryData.vitalsTrend.length
+  ? summaryData.vitalsTrend
+      .map((v) => `- ${v.date}: ${Object.entries(v.written).filter(([, x]) => x).map(([k, x]) => `${k} ${x}`).join(', ')}`)
+      .join('\n')
+  : 'None recorded'}
+
 ---
 
 Please write a detailed, professional clinical narrative summary (500-800 words) that:
@@ -2157,7 +2907,11 @@ FORMAT: plain text only. Put each section title on its own line. Do NOT use mark
 `;
 
   // Call Gemini API
+<<<<<<< HEAD
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${appConfig.GEMINI_API_KEY}`;
+=======
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${appConfig.GEMINI_MODEL}:generateContent?key=${appConfig.GEMINI_API_KEY}`;
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
 
   const payload = {
     contents: [
@@ -2174,6 +2928,10 @@ FORMAT: plain text only. Put each section title on its own line. Do NOT use mark
       // reasoning also counts against the limit (2048 truncated the visible text).
       temperature: 0.2,
       topP: 0.95,
+<<<<<<< HEAD
+=======
+      topK: 40,
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
       maxOutputTokens: 8192,
     },
   };
@@ -2195,10 +2953,15 @@ FORMAT: plain text only. Put each section title on its own line. Do NOT use mark
 
     const data: any = await response.json();
 
-    if (!data.candidates || !data.candidates[0]) {
+    const narrativeText: string = (data.candidates?.[0]?.content?.parts || [])
+      .map((p: any) => p.text || "")
+      .join("")
+      .trim();
+    if (!narrativeText) {
       throw new Error("Invalid response from Gemini API");
     }
 
+<<<<<<< HEAD
     const parts: any[] = data.candidates[0].content?.parts || [];
     const narrativeText = parts
       .filter((p) => !p.thought && typeof p.text === "string")
@@ -2213,6 +2976,8 @@ FORMAT: plain text only. Put each section title on its own line. Do NOT use mark
       console.warn("⚠️ Clinical narrative hit the token limit and may be cut off");
     }
 
+=======
+>>>>>>> 64974c0da637dfad3a29f38640fbf82eabd20ed1
     return narrativeText;
   } catch (error) {
     if (error instanceof Error) {
@@ -2221,3 +2986,86 @@ FORMAT: plain text only. Put each section title on its own line. Do NOT use mark
     throw new Error("Clinical narrative generation failed: Unknown error");
   }
 };
+
+// ---------- PDF text helpers ----------
+// Helvetica has no Bangla glyphs, and names/symptoms are stored in Bangla as
+// written, so Bangla runs are drawn with Noto Sans Bengali.
+const PDF_FONT_DIR = path.resolve(process.cwd(), "assets/fonts");
+const BN_FONT = { regular: "NotoSansBengali-Regular.ttf", bold: "NotoSansBengali-Bold.ttf" };
+let bnFontsAvailable: boolean | null = null;
+
+function registerPdfFonts(doc: any) {
+  if (bnFontsAvailable === null) {
+    bnFontsAvailable = Object.values(BN_FONT).every((f) => fs.existsSync(path.join(PDF_FONT_DIR, f)));
+    if (!bnFontsAvailable) console.warn(`⚠️ Bangla PDF fonts missing in ${PDF_FONT_DIR}`);
+  }
+  if (bnFontsAvailable) {
+    doc.registerFont("bn", path.join(PDF_FONT_DIR, BN_FONT.regular));
+    doc.registerFont("bn-bold", path.join(PDF_FONT_DIR, BN_FONT.bold));
+  }
+}
+
+// Bangla letters plus the spaces/dandas between them form one run (the Bengali
+// font has no ASCII punctuation, so commas etc. stay in Helvetica)
+// ZWNJ/ZWJ (U+200C/D) shape Bangla conjuncts, so they belong to the run.
+const BANGLA_RUN = /([ঀ-৿](?:[ঀ-৿।॥‌‍ ]*[ঀ-৿।॥])?)/;
+
+function writeMixed(doc: any, raw: string, opts: { bold?: boolean } & Record<string, any> = {}) {
+  const { bold, ...options } = opts;
+  const latin = bold ? "Helvetica-Bold" : "Helvetica";
+  // Invisible characters Helvetica would draw as boxes
+  const text = raw.replace(/[​⁠﻿]/g, "").replace(/[‌‍](?![ঀ-৿])/g, "");
+  const parts = bnFontsAvailable ? text.split(BANGLA_RUN).filter((p) => p !== "") : [text];
+  if (parts.length === 0) parts.push("");
+  parts.forEach((part, i) => {
+    const isBangla = bnFontsAvailable && /^[ঀ-৿]/.test(part);
+    doc.font(isBangla ? (bold ? "bn-bold" : "bn") : latin).text(part, {
+      ...options,
+      continued: i < parts.length - 1,
+    });
+  });
+}
+
+const VITAL_LABELS: Record<string, string> = {
+  bp: "BP",
+  pulse: "Pulse",
+  temperature: "Temp",
+  weight: "Weight",
+  spo2: "SpO2",
+  bloodSugar: "Sugar",
+};
+
+const formatAge = (age: string | null | undefined) => {
+  const a = (age ?? "").trim();
+  if (!a || a === "N/A") return "Not stated";
+  return /^\d+(\.\d+)?$/.test(a) ? `${a} years` : a;
+};
+
+const formatGender = (g: string | null | undefined) =>
+  g === "M" ? "Male" : g === "F" ? "Female" : "Not stated";
+
+// Gemini returns light Markdown; render headings/bullets/bold instead of printing raw ** and #
+function writeMarkdownToPdf(doc: any, markdown: string) {
+  const clean = (t: string) => t.replace(/\*\*(.+?)\*\*/g, "$1").replace(/\*\*/g, "").trim();
+
+  for (const raw of markdown.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) {
+      doc.moveDown(0.4);
+      continue;
+    }
+
+    const heading =
+      line.match(/^#{1,6}\s+(.+)$/) || line.match(/^\*\*([^*]+)\*\*:?$/);
+    if (heading) {
+      doc.moveDown(0.3).fontSize(12).fillColor("black");
+      writeMixed(doc, clean(heading[1]).replace(/:$/, ""), { bold: true, lineGap: 3 });
+      continue;
+    }
+
+    const bullet = line.match(/^(?:[-*•]|\d+\.)\s+(.+)$/);
+    const text = clean(bullet ? `• ${bullet[1]}` : line);
+    doc.fontSize(11).fillColor("black");
+    writeMixed(doc, text, { lineGap: 4, indent: bullet ? 10 : 0 });
+  }
+}

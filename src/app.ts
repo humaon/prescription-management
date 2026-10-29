@@ -17,6 +17,7 @@ import { cronAuth } from "./middleware/cronAuth.middleware";
 import helmet from "helmet";
 import { apiLimiter } from "./middleware/rateLimit.middleware";
 import { runRemindersForTimeSlot, runCleanupJobs } from "./jobs/reminderScheduler";
+import { expiredPage, renderSharedSummary } from "./services/share.service";
 
 const app = express();
 
@@ -101,8 +102,6 @@ app.post("/cron/reminders/noon", async (_req, res) => {
 // Cloud Scheduler endpoints - Night reminders (8:00 PM)
 app.post("/cron/reminders/night", async (_req, res) => {
   try {
-    app.use("/uploads", express.static("uploads"));
-
     console.log("🌙 Night reminder cron triggered");
     const count = await runRemindersForTimeSlot("night");
     res.status(200).json({ 
